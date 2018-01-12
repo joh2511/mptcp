@@ -639,6 +639,12 @@ struct rq {
 	 */
 	unsigned long nr_uninterruptible;
 
+#ifdef CONFIG_HPERF_HMP
+	struct task_struct *migrate_task; /* task from this rq for migration */
+	/* shows the amount of accumulated unfairness by tasks of this rq */
+	long druntime_sum;
+	unsigned int nr_hmp_tasks;
+#endif
 	struct task_struct *curr, *idle, *stop;
 	unsigned long next_balance;
 	struct mm_struct *prev_mm;
@@ -939,6 +945,16 @@ static inline void register_sched_domain_sysctl(void)
 }
 static inline void unregister_sched_domain_sysctl(void)
 {
+}
+#endif
+
+#ifdef CONFIG_HPERF_HMP
+extern struct cpumask *cpu_fastest_mask;
+extern struct cpumask *cpu_slowest_mask;
+
+static inline bool cpu_is_fastest(int cpu)
+{
+	return cpumask_test_cpu(cpu, cpu_fastest_mask);
 }
 #endif
 

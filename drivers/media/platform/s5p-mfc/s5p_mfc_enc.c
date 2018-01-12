@@ -850,6 +850,7 @@ static int enc_post_frame_start(struct s5p_mfc_ctx *ctx)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
 	struct s5p_mfc_buf *mb_entry;
+	struct s5p_mfc_buf *dst_buf;
 	unsigned long enc_y_addr, enc_c_addr;
 	unsigned long mb_y_addr, mb_c_addr;
 	int slice_type;
@@ -869,8 +870,14 @@ static int enc_post_frame_start(struct s5p_mfc_ctx *ctx)
 					&mb_entry->b->vb2_buf, 0);
 			mb_c_addr = vb2_dma_contig_plane_dma_addr(
 					&mb_entry->b->vb2_buf, 1);
+			dst_buf = list_entry(ctx->dst_queue.next,
+					struct s5p_mfc_buf, list);
 			if ((enc_y_addr == mb_y_addr) &&
 						(enc_c_addr == mb_c_addr)) {
+				dst_buf->b->timecode =
+					mb_entry->b->timecode;
+				dst_buf->b->vb2_buf.timestamp =
+					mb_entry->b->vb2_buf.timestamp;
 				list_del(&mb_entry->list);
 				ctx->src_queue_cnt--;
 				vb2_buffer_done(&mb_entry->b->vb2_buf,
@@ -883,8 +890,14 @@ static int enc_post_frame_start(struct s5p_mfc_ctx *ctx)
 					&mb_entry->b->vb2_buf, 0);
 			mb_c_addr = vb2_dma_contig_plane_dma_addr(
 					&mb_entry->b->vb2_buf, 1);
+			dst_buf = list_entry(ctx->dst_queue.next,
+					struct s5p_mfc_buf, list);
 			if ((enc_y_addr == mb_y_addr) &&
 						(enc_c_addr == mb_c_addr)) {
+				dst_buf->b->timecode =
+					mb_entry->b->timecode;
+				dst_buf->b->vb2_buf.timestamp =
+					mb_entry->b->vb2_buf.timestamp;
 				list_del(&mb_entry->list);
 				ctx->ref_queue_cnt--;
 				vb2_buffer_done(&mb_entry->b->vb2_buf,
@@ -1268,7 +1281,7 @@ static int vidioc_dqbuf(struct file *file, void *priv, struct v4l2_buffer *buf)
 	int ret;
 
 	if (ctx->state == MFCINST_ERROR) {
-		mfc_err("Call on DQBUF after unrecoverable error\n");
+		mfc_err_limited("Call on DQBUF after unrecoverable error\n");
 		return -EIO;
 	}
 	if (buf->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
@@ -1832,7 +1845,7 @@ static int s5p_mfc_queue_setup(struct vb2_queue *vq,
 		if (*buf_count > MFC_MAX_BUFFERS)
 			*buf_count = MFC_MAX_BUFFERS;
 		psize[0] = ctx->enc_dst_buf_size;
-		alloc_devs[0] = ctx->dev->mem_dev_l;
+		alloc_devs[0] = ctx->dev->mem_dev[BANK_L_CTX];
 	} else if (vq->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
 		if (ctx->src_fmt)
 			*plane_count = ctx->src_fmt->num_planes;
@@ -1848,11 +1861,11 @@ static int s5p_mfc_queue_setup(struct vb2_queue *vq,
 		psize[1] = ctx->chroma_size;
 
 		if (IS_MFCV6_PLUS(dev)) {
-			alloc_devs[0] = ctx->dev->mem_dev_l;
-			alloc_devs[1] = ctx->dev->mem_dev_l;
+			alloc_devs[0] = ctx->dev->mem_dev[BANK_L_CTX];
+			alloc_devs[1] = ctx->dev->mem_dev[BANK_L_CTX];
 		} else {
-			alloc_devs[0] = ctx->dev->mem_dev_r;
-			alloc_devs[1] = ctx->dev->mem_dev_r;
+			alloc_devs[0] = ctx->dev->mem_dev[BANK_R_CTX];
+			alloc_devs[1] = ctx->dev->mem_dev[BANK_R_CTX];
 		}
 	} else {
 		mfc_err("invalid queue type: %d\n", vq->type);

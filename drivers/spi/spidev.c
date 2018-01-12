@@ -696,6 +696,7 @@ static struct class *spidev_class;
 static const struct of_device_id spidev_dt_ids[] = {
 	{ .compatible = "rohm,dh2228fv" },
 	{ .compatible = "lineartechnology,ltc2488" },
+	{ .compatible = "spidev" },
 	{},
 };
 MODULE_DEVICE_TABLE(of, spidev_dt_ids);
@@ -811,6 +812,10 @@ static int spidev_remove(struct spi_device *spi)
 	/* make sure ops on existing fds can abort cleanly */
 	spin_lock_irq(&spidev->spi_lock);
 	spidev->spi = NULL;
+
+	if(spi->master->cleanup)
+		spi->master->cleanup(spi);
+
 	spin_unlock_irq(&spidev->spi_lock);
 
 	/* prevent new opens */

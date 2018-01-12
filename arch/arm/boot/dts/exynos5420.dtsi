@@ -185,10 +185,20 @@
 			compatible = "samsung,exynos5420-audss-clock";
 			reg = <0x03810000 0x0C>;
 			#clock-cells = <1>;
-			clocks = <&clock CLK_FIN_PLL>, <&clock CLK_MAU_EPLL>,
-				 <&clock CLK_SCLK_MAUDIO0>, <&clock CLK_SCLK_MAUPCM0>;
-			clock-names = "pll_ref", "pll_in", "sclk_audio", "sclk_pcm_in";
+			clocks = <&clock CLK_FOUT_EPLL>, <&clock CLK_FIN_PLL>,
+				<&clock CLK_MOUT_MAU_EPLL_USER>, <&clock CLK_SCLK_MAUDIO0>,
+				<&clock CLK_SCLK_MAUPCM0>;
+			clock-names = "fout_epll", "pll_ref", "pll_in", "sclk_audio", "sclk_pcm_in";
 		};
+
+                g2d@10850000 {
+                        compatible = "samsung,exynos5250-g2d";
+                        reg = <0x10850000 0x1000>;
+                        interrupts = <0 91 0>;
+                        clocks = <&clock CLK_G2D>;
+                        clock-names = "fimg2d";
+                        iommus = <&sysmmu_g2dr>, <&sysmmu_g2dw>;
+                };
 
 		mfc: codec@11000000 {
 			compatible = "samsung,mfc-v7";
@@ -694,7 +704,7 @@
 			interrupts = <0 65 0>;
 			clocks = <&clock CLK_TMU>;
 			clock-names = "tmu_apbif";
-			#include "exynos4412-tmu-sensor-conf.dtsi"
+			#include "exynos5420-tmu-sensor-conf.dtsi"
 		};
 
 		tmu_cpu1: tmu@10064000 {
@@ -703,7 +713,7 @@
 			interrupts = <0 183 0>;
 			clocks = <&clock CLK_TMU>;
 			clock-names = "tmu_apbif";
-			#include "exynos4412-tmu-sensor-conf.dtsi"
+			#include "exynos5420-tmu-sensor-conf.dtsi"
 		};
 
 		tmu_cpu2: tmu@10068000 {
@@ -712,7 +722,7 @@
 			interrupts = <0 184 0>;
 			clocks = <&clock CLK_TMU>, <&clock CLK_TMU>;
 			clock-names = "tmu_apbif", "tmu_triminfo_apbif";
-			#include "exynos4412-tmu-sensor-conf.dtsi"
+			#include "exynos5420-tmu-sensor-conf.dtsi"
 		};
 
 		tmu_cpu3: tmu@1006c000 {
@@ -721,7 +731,7 @@
 			interrupts = <0 185 0>;
 			clocks = <&clock CLK_TMU>, <&clock CLK_TMU_GPU>;
 			clock-names = "tmu_apbif", "tmu_triminfo_apbif";
-			#include "exynos4412-tmu-sensor-conf.dtsi"
+			#include "exynos5420-tmu-sensor-conf.dtsi"
 		};
 
 		tmu_gpu: tmu@100a0000 {
@@ -730,7 +740,7 @@
 			interrupts = <0 215 0>;
 			clocks = <&clock CLK_TMU_GPU>, <&clock CLK_TMU>;
 			clock-names = "tmu_apbif", "tmu_triminfo_apbif";
-			#include "exynos4412-tmu-sensor-conf.dtsi"
+			#include "exynos5420-tmu-sensor-conf.dtsi"
 		};
 
 		sysmmu_g2dr: sysmmu@0x10A60000 {
@@ -1343,12 +1353,17 @@
 	pinctrl-names = "default";
 	pinctrl-0 = <&i2c1_bus>;
 };
-
+/*
 &i2c_2 {
 	clocks = <&clock CLK_I2C2>;
 	clock-names = "i2c";
 	pinctrl-names = "default";
 	pinctrl-0 = <&i2c2_bus>;
+};
+*/
+&i2c_2 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&hdmi_i2c_bus>;
 };
 
 &i2c_3 {

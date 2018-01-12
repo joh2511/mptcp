@@ -20,6 +20,7 @@
 #include <linux/gpio.h>
 #include <linux/spi/spi.h>
 #include <video/mipi_display.h>
+#include <linux/platform_data/spi-s3c64xx.h>
 
 #include "fbtft.h"
 
@@ -268,6 +269,11 @@ static int waveshare32b_init_sequence[] = {
 	-1, MIPI_DCS_SET_DISPLAY_ON,
 	-1, MIPI_DCS_WRITE_MEMORY_START,
 	-3
+};
+
+static struct s3c64xx_spi_csinfo hktft9340_controller_data = {
+	.fb_delay = 1,
+	.line = 190,
 };
 
 /* Supported displays in alphabetical order */
@@ -543,20 +549,22 @@ static struct fbtft_device_display displays[] = {
 			.dev = {
 			.release = fbtft_device_pdev_release,
 			.platform_data = &(struct fbtft_platform_data) {
+				/* for ODROID TFT35(ili9488) */
+				.bgr = true,
 				.gpios = (const struct fbtft_gpio []) {
-					{ "reset", 17 },
-					{ "dc", 1 },
-					{ "wr", 0 },
-					{ "cs", 21 },
-					{ "db00", 9 },
-					{ "db01", 11 },
-					{ "db02", 18 },
-					{ "db03", 23 },
-					{ "db04", 24 },
-					{ "db05", 25 },
-					{ "db06", 8 },
-					{ "db07", 7 },
-					{ "led", 4 },
+					{ "reset", 174 }, /* GPA0.3 */
+					{ "dc",    28  }, /* GPX2.4 */
+					{ "wr",    190 }, /* GPA2.5 */
+					{ "cs",    173 }, /* GPA0.2 */
+					{ "db00",  23  }, /* GPX1.7 */
+					{ "db01",  24  }, /* GPX2.0 */
+					{ "db02",  19  }, /* GPX1.3 */
+					{ "db03",  189 }, /* GPA2.4 */
+					{ "db04",  191 }, /* GPA2.6 */
+					{ "db05",  192 }, /* GPA2.7 */
+					{ "db06",  22  }, /* GPX1.6 */
+					{ "db07",  21  }, /* GPX1.5 */
+					{ "led",   31  }, /* GPX2.7 */
 					{},
 				},
 			},
@@ -841,7 +849,46 @@ static struct fbtft_device_display displays[] = {
 			}
 		}
 	}, {
-
+		.name = "hktft9340",
+		.spi = &(struct spi_board_info) {
+			.modalias = "fb_ili9340",
+			.max_speed_hz = 40000000,
+			.mode = SPI_MODE_0,
+			.controller_data = &hktft9340_controller_data,
+			.platform_data = &(struct fbtft_platform_data) {
+				.display = {
+					.buswidth = 8,
+					.backlight = 1,
+				},
+				.bgr = true,
+				.gpios = (const struct fbtft_gpio []) {
+					{ "reset", 21 },
+					{ "dc", 22 },
+					{ "led", 18 },
+					{},
+				},
+			}
+		}
+	}, {
+		.name = "odroid32",
+		.spi = &(struct spi_board_info) {
+			.modalias = "fb_ili9340",
+			.max_speed_hz = 32000000,
+			.mode = SPI_MODE_0,
+			.controller_data = &hktft9340_controller_data,
+			.platform_data = &(struct fbtft_platform_data) {
+				.display = {
+					.buswidth = 8,
+				},
+				.bgr = true,
+				.gpios = (const struct fbtft_gpio []) {
+					{ "reset", 21 },
+					{ "dc", 22 },
+					{},
+				},
+			}
+		}
+	}, {
 		.name = "piscreen",
 		.spi = &(struct spi_board_info) {
 			.modalias = "fb_ili9486",
@@ -1580,6 +1627,11 @@ static int __init fbtft_device_init(void)
 static void __exit fbtft_device_exit(void)
 {
 	if (spi_device) {
+		if (spi_device->controller_data) {
+			struct s3c64xx_spi_csinfo *cs = spi_device->controller_data;
+			if (cs->line)
+				gpio_free(cs->line);
+		}
 		device_del(&spi_device->dev);
 		kfree(spi_device);
 	}

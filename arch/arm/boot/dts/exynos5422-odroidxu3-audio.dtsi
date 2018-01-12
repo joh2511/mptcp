@@ -13,33 +13,25 @@
 
 / {
 	sound: sound {
-		compatible = "simple-audio-card";
-
-		simple-audio-card,name = "Odroid-XU3";
-		simple-audio-card,widgets =
-			"Headphone", "Headphone Jack",
-			"Speakers", "Speakers";
-		simple-audio-card,routing =
-			"Headphone Jack", "HPL",
-			"Headphone Jack", "HPR",
-			"Headphone Jack", "MICBIAS",
-			"IN1", "Headphone Jack",
-			"Speakers", "SPKL",
-			"Speakers", "SPKR";
-
-		simple-audio-card,format = "i2s";
-		simple-audio-card,bitclock-master = <&link0_codec>;
-		simple-audio-card,frame-master = <&link0_codec>;
-
-		simple-audio-card,cpu {
-			sound-dai = <&i2s0 0>;
-			system-clock-frequency = <19200000>;
-		};
-
-		link0_codec: simple-audio-card,codec {
-			sound-dai = <&max98090>;
-			clocks = <&i2s0 CLK_I2S_CDCLK>;
-		};
+		compatible = "hardkernel,odroid-max98090";
+		card-name = "odroid-snd";
+		clocks = <&clock CLK_FOUT_EPLL>,
+			<&clock CLK_MOUT_EPLL>,
+			<&clock CLK_MOUT_MAU_EPLL>,
+			<&clock CLK_MOUT_MAU_EPLL_USER>,
+			<&clock_audss EXYNOS_MOUT_AUDSS>,
+			<&clock_audss EXYNOS_MOUT_I2S>,
+			<&clock_audss EXYNOS_DOUT_SRP>,
+			<&clock_audss EXYNOS_DOUT_AUD_BUS>,
+			<&clock CLK_MAU_EPLL>;
+		clock-names = "fout_epll", "mout_sclk_epll",
+			"mout_mau_epll","mout_mau_epll_user",
+			"mout_audss", "mout_i2s",
+			"dout_srp","dout_aud_bus",
+			"mau_epll_clk";
+		samsung,i2s-controller = <&i2s0 0>;
+		samsung,audio-codec = <&max98090>;
+		codec-dai-name = "HiFi";
 	};
 };
 
@@ -50,8 +42,6 @@
 		reg = <0x10>;
 		interrupt-parent = <&gpx3>;
 		interrupts = <2 0>;
-		clocks = <&i2s0 CLK_I2S_CDCLK>;
-		clock-names = "mclk";
 		#sound-dai-cells = <0>;
 	};
 };
