@@ -575,6 +575,8 @@ static int htb_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 	struct htb_sched *q = qdisc_priv(sch);
 	struct htb_class *cl = htb_classify(skb, sch, &ret);
 
+	//printk("afr: htb_enqueue skb %p for sch %p with class %p and q.qlen %u\n", skb, sch, cl, sch->q.qlen);
+
 	if (cl == HTB_DIRECT) {
 		/* enqueue to helper queue */
 		if (q->direct_queue.qlen < q->direct_qlen) {
@@ -847,6 +849,7 @@ next:
 		}
 
 		skb = cl->un.leaf.q->dequeue(cl->un.leaf.q);
+		//printk("afr: htb_dequeue_tree found skb in cl->un.leaf.q %p with qlen %u\n", skb, cl->un.leaf.q->q.qlen);
 		if (likely(skb != NULL))
 			break;
 
@@ -885,6 +888,7 @@ static struct sk_buff *htb_dequeue(struct Qdisc *sch)
 
 	/* try to dequeue direct packets as high prio (!) to minimize cpu work */
 	skb = __skb_dequeue(&q->direct_queue);
+	//printk("afr: htb_dequeue found skb %p early\n", skb);
 	if (skb != NULL) {
 ok:
 		qdisc_bstats_update(sch, skb);
@@ -921,6 +925,7 @@ ok:
 
 			m |= 1 << prio;
 			skb = htb_dequeue_tree(q, prio, level);
+			//printk("afr: htb_dequeue found skb %p late\n", skb);
 			if (likely(skb != NULL))
 				goto ok;
 		}
@@ -973,13 +978,18 @@ static void htb_reset(struct Qdisc *sch)
 	struct htb_class *cl;
 	unsigned int i;
 
+	//printk("afr: htb_reset for sch %p with qlen %u\n", sch, sch->q.qlen);
+
 	for (i = 0; i < q->clhash.hashsize; i++) {
 		hlist_for_each_entry(cl, &q->clhash.hash[i], common.hnode) {
 			if (cl->level)
 				memset(&cl->un.inner, 0, sizeof(cl->un.inner));
 			else {
-				if (cl->un.leaf.q)
+				if (cl->un.leaf.q) {
+					//printk("afr: htb_reset for sch %p in loop reset class %p with q %u\n", sch, cl, cl->un.leaf.q->q.qlen);
+
 					qdisc_reset(cl->un.leaf.q);
+				}
 				INIT_LIST_HEAD(&cl->un.leaf.drop_list);
 			}
 			cl->prio_activity = 0;
@@ -1025,6 +1035,7 @@ static int htb_init(struct Qdisc *sch, struct nlattr *opt)
 	if (!opt)
 		return -EINVAL;
 
+	//printk("afr: htb_init for qdisc %p\n", sch);
 	err = nla_parse_nested(tb, TCA_HTB_MAX, opt, htb_policy);
 	if (err < 0)
 		return err;
@@ -1232,6 +1243,7 @@ static void htb_parent_to_leaf(struct htb_sched *q, struct htb_class *cl,
 
 static void htb_destroy_class(struct Qdisc *sch, struct htb_class *cl)
 {
+	//printk("afr: htb_destroy class %p for sched %p\n", cl, sch);
 	if (!cl->level) {
 		WARN_ON(!cl->un.leaf.q);
 		qdisc_destroy(cl->un.leaf.q);
@@ -1248,6 +1260,7 @@ static void htb_destroy(struct Qdisc *sch)
 	struct htb_class *cl;
 	unsigned int i;
 
+	//printk("afr: htb_destroy sch %p\n", sch);
 	cancel_work_sync(&q->work);
 	qdisc_watchdog_cancel(&q->watchdog);
 	/* This line used to be after htb_destroy_class call below
@@ -1267,6 +1280,7 @@ static void htb_destroy(struct Qdisc *sch)
 			htb_destroy_class(sch, cl);
 	}
 	qdisc_class_hash_destroy(&q->clhash);
+	//printk("afr: htb_destroy sch %p with direct_qlen %u and qlen %u\n", sch, q->direct_qlen, q->direct_queue.qlen);
 	__skb_queue_purge(&q->direct_queue);
 }
 
@@ -1277,7 +1291,7 @@ static int htb_delete(struct Qdisc *sch, unsigned long arg)
 	unsigned int qlen;
 	struct Qdisc *new_q = NULL;
 	int last_child = 0;
-
+	//printk("afr: htb_delete for sch %p\n", sch);
 	/* TODO: why don't allow to delete subtree ? references ? does
 	 * tc subsys guarantee us that in htb_destroy it holds no class
 	 * refs so that we can remove children safely there ?
@@ -1343,6 +1357,8 @@ static int htb_change_class(struct Qdisc *sch, u32 classid,
 	struct nlattr *tb[TCA_HTB_MAX + 1];
 	struct tc_htb_opt *hopt;
 	u64 rate64, ceil64;
+
+	//printk("afr: htb_change class with id %u for sch %p\n", classid, sch);
 
 	/* extract all subattrs from opt attr */
 	if (!opt)
@@ -1479,7 +1495,7 @@ static int htb_change_class(struct Qdisc *sch, u32 classid,
 	}
 
 	rate64 = tb[TCA_HTB_RATE64] ? nla_get_u64(tb[TCA_HTB_RATE64]) : 0;
-
+	//printk("afr: htb_change to new rate64 %llu for sch %p\n", rate64, sch);
 	ceil64 = tb[TCA_HTB_CEIL64] ? nla_get_u64(tb[TCA_HTB_CEIL64]) : 0;
 
 	psched_ratecfg_precompute(&cl->rate, &hopt->rate, rate64);

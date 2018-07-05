@@ -2549,7 +2549,7 @@ static int mptcp_pm_seq_show(struct seq_file *seq, void *v)
 	const struct net *net = seq->private;
 	int i, n = 0;
 
-	seq_printf(seq, "  sl  loc_tok  rem_tok  v6 local_address                         remote_address                        st ns tx_queue rx_queue inode scheduler  meta p");
+	seq_printf(seq, "  sl  loc_tok  rem_tok  v6 local_address                         remote_address                        st ns tx_queue rx_queue inode scheduler");
 	seq_putc(seq, '\n');
 
 	for (i = 0; i < MPTCP_HASH_SIZE; i++) {
@@ -2591,15 +2591,15 @@ static int mptcp_pm_seq_show(struct seq_file *seq, void *v)
 					   ntohs(isk->inet_dport));
 #endif
 			}
-			seq_printf(seq, " %02X %02X %08X:%08X %lu %s  %p",
+			seq_printf(seq, " %02X %02X %08X:%08X %lu %s",
 				   meta_sk->sk_state, mpcb->cnt_subflows,
 				   meta_tp->write_seq - meta_tp->snd_una,
 				   max_t(int, meta_tp->rcv_nxt -
 					 meta_tp->copied_seq, 0),
-				   sock_i_ino(meta_sk), mpcb->sched_ops->name, meta_sk);
+				   sock_i_ino(meta_sk), mpcb->sched_ops->name);
 			seq_putc(seq, '\n');
 
-#if 1
+#if 0
 			// added more stats per subflow... maybe we should move this to a new file
 			seq_printf(seq, "            snd            rcv           srtt           mdev    packets_out    retrans_out       snd_cwnd\n");
 

@@ -64,7 +64,7 @@ endif
 config DEFAULT_MPTCP_PM
 	string
 	default "default" if DEFAULT_DUMMY
-	default "fullmesh" if DEFAULT_FULLMESH 
+	default "fullmesh" if DEFAULT_FULLMESH
 	default "ndiffports" if DEFAULT_NDIFFPORTS
 	default "binder" if DEFAULT_BINDER
 	default "default"
@@ -91,6 +91,30 @@ config MPTCP_REDUNDANT
 	---help---
 	  This scheduler sends all packets redundantly over all subflows to decreases
 	  latency and jitter on the cost of lower throughput.
+
+config MPTCP_RBS
+	tristate "MPTCP Rule-based Scheduler"
+	depends on (MPTCP=y)
+	---help---
+	  Some description
+
+config MPTCP_RBSMEASURE
+	tristate "Measurements"
+	depends on (MPTCP_RBS=y)
+	---help---
+	  Some description
+
+config MPTCP_RBSOPT
+	tristate "Optimizations"
+	depends on (MPTCP_RBS=y)
+	---help---
+	  Some description
+
+config MPTCP_RBSEBPF
+	tristate "eBPF Code Generator"
+	depends on (MPTCP_RBSOPT=y) && (BPF_JIT=y)
+	---help---
+	  Some description
 
 choice
 	prompt "Default MPTCP Scheduler"

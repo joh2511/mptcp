@@ -35,6 +35,10 @@
 
 #include <linux/kconfig.h>
 
+// for rbs specific stuff :-(
+#include "mptcp_rbs_queue.h"
+#include "mptcp_rbs_sched.h"
+
 /* is seq1 < seq2 ? */
 static inline bool before64(const u64 seq1, const u64 seq2)
 {
@@ -124,6 +128,20 @@ static void mptcp_clean_rtx_queue(struct sock *meta_sk, u32 prior_snd_una)
 		if (!fully_acked)
 			break;
 
+		/* RBS specific stuff */
+		if (mptcp_rbs_is_sched_used(meta_tp)) {
+			struct mptcp_rbs_cb* rbs_cb = mptcp_rbs_get_cb(meta_tp);
+			mptcp_debug("checking in mptcp_input for queue position\n");
+
+			if(skb == rbs_cb->queue_position) {
+				mptcp_debug("rbs has to correct queue position old %p\n", rbs_cb->queue_position);
+				mptcp_rbs_advance_send_head(meta_sk, &rbs_cb->queue_position);
+				mptcp_debug("rbs had to correct queue position %p\n", rbs_cb->queue_position);
+			}
+		}
+		mptcp_debug("unlinking skb %p from sk_send_queue\n", skb);
+		/* RBS specific stuff END */
+
 		tcp_unlink_write_queue(skb, meta_sk);
 
 		if (mptcp_is_data_fin(skb)) {
@@ -157,6 +175,13 @@ static void mptcp_clean_rtx_queue(struct sock *meta_sk, u32 prior_snd_una)
 
 			mptcp_tso_acked_reinject(meta_sk, skb);
 			break;
+		}
+
+		mptcp_debug("unlinking skb %p from reinject_queue %p with reinject->next %p\n", skb, &mpcb->reinject_queue, mpcb->reinject_queue.next);
+		if(skb) {
+			mptcp_debug("skb->next = %p and skb->prev = %p\n", skb->next, skb->prev);
+		} else {
+			printk("##### skb is null\n");
 		}
 
 		__skb_unlink(skb, &mpcb->reinject_queue);
@@ -872,6 +897,12 @@ static int mptcp_validate_mapping(struct sock *sk, struct sk_buff *skb)
 	return 0;
 }
 
+//#define AFR_OOO_RECEIVE_VERBOSE
+
+/* checks all subflows ofo queues except sk if something fits */
+void mptcp_afr_all_ofo_queue(struct sock *meta_sk, struct sock *sk);
+
+
 /* @return: 0  everything is fine. Just continue processing
  *	    1  subflow is broken stop everything
  *	    -1 this mapping has been put in the meta-receive-queue
@@ -886,6 +917,10 @@ static int mptcp_queue_skb(struct sock *sk)
 	u64 rcv_nxt64 = mptcp_get_rcv_nxt_64(meta_tp);
 	u32 old_copied_seq = tp->copied_seq;
 	bool data_queued = false;
+
+#ifdef AFR_OOO_RECEIVE_VERBOSE
+	printk("%s afr_ofo for sk %p\n", __func__, sk);
+#endif
 
 	/* Have we not yet received the full mapping? */
 	if (!tp->mptcp->mapping_present ||
@@ -967,7 +1002,9 @@ static int mptcp_queue_skb(struct sock *sk)
 			 * Then, kfree_skb_partial will not account the memory.
 			 */
 			skb_orphan(tmp1);
-
+#ifdef AFR_OOO_RECEIVE_VERBOSE
+			printk("%s afr_ofo test if segment has already been received with skb->end_seq %u after meta_tp->rcv_nxt %u\n", __func__, TCP_SKB_CB(tmp1)->end_seq, meta_tp->rcv_nxt);
+#endif
 			/* This segment has already been received */
 			if (!after(TCP_SKB_CB(tmp1)->end_seq, meta_tp->rcv_nxt)) {
 				__kfree_skb(tmp1);
@@ -997,6 +1034,8 @@ static int mptcp_queue_skb(struct sock *sk)
 			/* Check if this fills a gap in the ofo queue */
 			if (!skb_queue_empty(&meta_tp->out_of_order_queue))
 				mptcp_ofo_queue(meta_sk);
+			/* Whenever we check the ofo_queue, we check all sbf ofos */
+			mptcp_afr_all_ofo_queue(meta_sk, sk);
 
 			if (eaten)
 				kfree_skb_partial(tmp1, fragstolen);
@@ -1014,6 +1053,190 @@ next:
 	mptcp_reset_mapping(tp, old_copied_seq);
 
 	return data_queued ? -1 : -2;
+}
+
+void afr_ofo_push(struct sock *sk) {
+	struct tcp_sock *tp = tcp_sk(sk), *meta_tp = mptcp_meta_tp(tp);
+	struct sock *meta_sk = mptcp_meta_sk(sk);
+	struct sk_buff *tmp, *skb;
+
+	if(!mptcp_ooo_opt) {
+		return;
+	}
+
+	if(tp->out_of_order_queue.qlen > 0) {
+#ifdef AFR_OOO_RECEIVE_VERBOSE
+		printk("%s afr_ooo checking sbf %p out_of_order_queue.qlen %u\n", __func__, sk, tp->out_of_order_queue.qlen);
+#endif
+		/*
+		 * traverse the whole queue
+		 *
+		 * there might be lower data_seq with higher subflow_seq:
+		 * repeat loop whenever we match something and we saw out of order data_seq
+		 */
+		while(true) {
+			bool out_of_order_data_seq = false;
+			u32 last_data_seq = 0;
+			bool matched = false;
+
+		skb_queue_walk_safe(&tp->out_of_order_queue, skb, tmp)
+		{
+			u32 *ptr;
+			u32 data_seq, sub_seq, data_len;
+
+#ifdef AFR_OOO_RECEIVE_VERBOSE
+			printk("%s afr_ooo packet %p with seq %u and end_seq %u and len %u\n", __func__, skb, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq, TCP_SKB_CB(skb)->end_seq - TCP_SKB_CB(skb)->seq);;
+#endif
+
+			/* No mapping here? Exit - for a first version we only accept packets with mapping */
+			/* TODO: check if old mapping still maps this sequence number */
+			if (!mptcp_is_data_seq(skb)) {
+				// no ifdef, at this is really important!
+				printk("%s afr__ooo packet %p in ofo has no mapping... go to next skb...\n", __func__, skb);
+				continue;
+			}
+
+			ptr = mptcp_skb_set_data_seq(skb, &data_seq, NULL);
+			ptr++;
+			sub_seq = get_unaligned_be32(ptr) + tp->mptcp->rcv_isn;
+			ptr++;
+			data_len = get_unaligned_be16(ptr);
+#ifdef AFR_OOO_RECEIVE_VERBOSE
+			printk("packet %p in ofo queue with data_seq %u sub_seq %u and data_len %u\n", skb, data_seq, sub_seq, data_len);
+			printk("comparing meta_tp->rcv_nxt %u and data_seq %u\n", meta_tp->rcv_nxt, data_seq);
+#endif
+			if(!before(last_data_seq, data_seq)) {
+#ifdef AFR_OOO_RECEIVE_VERBOSE
+				printk("found out of order data_seq in the sbf ooo queue\n");
+#endif
+				out_of_order_data_seq = true;
+			}
+
+			if (before(meta_tp->rcv_nxt, data_seq)) {
+				/*
+				 * Seg's have to go to the meta-ofo-queue
+				 *
+				 * We avoid this, as most packets in heterogeneous networks would
+				 * go into meta-ofo-queue. Instead, we check again whenever we get new packets.
+				 */
+
+				// TODO really most packets? actually only those which are ooo in both layers.
+			} else {
+				/* Ready for the meta-rcv-queue */
+				bool eaten = false;
+				bool fragstolen = false;
+				struct sk_buff* skb_cpy = NULL;
+
+				/* Design decision: we keep all packets in the
+				 * subflow receive queue (no unlinking) to keep
+				 * changes minimal.
+				 */
+				u32 data_end_seq = data_seq + data_len;
+#ifdef AFR_OOO_RECEIVE_VERBOSE
+				printk("comparing data_end_seq %u and meta_tp->rcv_nxt %u\n", data_end_seq, meta_tp->rcv_nxt);
+#endif
+
+				if (!after(data_end_seq , meta_tp->rcv_nxt)) {
+#ifdef AFR_OOO_RECEIVE_VERBOSE
+					printk("packet %p with meta_end_seq %u is already fully in meta_receive_queue\n", skb, data_end_seq);
+#endif
+					continue;
+				}
+
+				// I did not check the implementation, but packetdrill 3 checks that partially
+				// overlapping numbers work
+
+				// design decision: copy the packet, so the old subflow logic still has its own copy
+
+				skb_cpy = pskb_copy_for_clone(skb, GFP_ATOMIC);
+#ifdef AFR_OOO_RECEIVE_VERBOSE
+				printk("ok, it will fit in the meta, so we COPY it to be sure... old %p to new skb_cpy %p\n", skb, skb_cpy);
+#endif
+
+				if(!skb_cpy) {
+					// no space available... actually, it is not so important
+					// but no ifdef here, as this is interesting!
+					printk("%s failed copying packet\n", __func__);
+					return;
+				}
+
+				matched = true;
+
+				// we have to recalculate the seq numbers... stolen from prepare_skb
+				/* Adapt data-seq's to the packet itself. We kinda transform the
+				 * dss-mapping to a per-packet granularity. This is necessary to
+				 * correctly handle overlapping mappings coming from different
+				 * subflows. Otherwise it would be a complete mess.
+				 */
+				TCP_SKB_CB(skb_cpy)->seq = data_seq;
+				TCP_SKB_CB(skb_cpy)->end_seq = data_end_seq;
+
+//				printk("%s matched ooo packet for meta_sk %p on sbf %p with sbf seq %u end_seq %u and meta seq %u end_seq %u with sbf.rq.count %u and tp->rcv_nxt %u\n", 
+//					__func__, meta_sk, sk, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq, data_seq, data_end_seq, tp->out_of_order_queue.qlen, tp->rcv_nxt);
+				mptcp_ooo_number_matches++;
+
+				/* Is direct copy possible ? */
+				if (TCP_SKB_CB(skb_cpy)->seq == meta_tp->rcv_nxt &&
+					meta_tp->ucopy.task == current &&
+					meta_tp->copied_seq == meta_tp->rcv_nxt &&
+					meta_tp->ucopy.len && sock_owned_by_user(meta_sk)) {
+
+//					printk("%s uses direct copy for skb_cpy %p\n", __func__, skb_cpy);
+					eaten = mptcp_direct_copy(skb_cpy, meta_sk);
+//					printk("%s direct copy returned %u\n", __func__, eaten);
+				}
+
+				if (meta_tp->mpcb->in_time_wait) { /* In time-wait, do not receive data */
+					printk("%s eats skb as we are in time wait\n", __func__);
+					eaten = 1;
+				}
+
+				if (!eaten) {
+#ifdef AFR_OOO_RECEIVE_VERBOSE
+					printk("we put skb_cpy %p into the meta receive queue\n", skb_cpy);
+#endif
+					eaten = tcp_queue_rcv(meta_sk, skb_cpy, 0, &fragstolen);
+				}
+
+				meta_tp->rcv_nxt = TCP_SKB_CB(skb_cpy)->end_seq;
+				// TODO do we need this?
+				//mptcp_check_rcvseq_wrap(meta_tp, old_rcv_nxt);
+
+				/* Check if this fills a gap in the ofo queue */
+				if (!skb_queue_empty(&meta_tp->out_of_order_queue))
+					mptcp_ofo_queue(meta_sk);
+				/* Whenever we check the ofo_queue, we check all sbf ofos */
+				mptcp_afr_all_ofo_queue(meta_sk, sk);
+			}
+		}
+
+			if(!matched)
+				break;
+			if(!out_of_order_data_seq)
+				break;
+#ifdef AFR_OOO_RECEIVE_VERBOSE
+			printk("%s matched packet and saw out of order data seq... iterate one more time\n", __func__);
+#endif
+		}
+	}
+}
+
+/* checks all subflows ofo queues except sk if something fits */
+void mptcp_afr_all_ofo_queue(struct sock *meta_sk, struct sock *not_sk) {
+	struct sock *sk;
+	struct mptcp_cb *mpcb = tcp_sk(meta_sk)->mpcb;
+
+	if(!mptcp_ooo_opt) {
+		return;
+	}
+
+	mptcp_for_each_sk(mpcb, sk) {
+		if(sk == not_sk)
+			continue;
+		if(tcp_sk(sk)->out_of_order_queue.qlen > 0) {
+			afr_ofo_push(sk);
+		}
+	}
 }
 
 void mptcp_data_ready(struct sock *sk)
@@ -1035,30 +1258,50 @@ restart:
 		tcp_sk(sk)->copied_seq = tcp_sk(sk)->rcv_nxt;
 		goto exit;
 	}
-
+#ifdef AFR_OOO_RECEIVE_VERBOSE
+	printk("%s afr_ofo for sk %p with sk_receive_queue.qlen %u called by %pS\n",  __func__, sk, sk->sk_receive_queue.qlen, __builtin_return_address(0));
+#endif
 	/* Iterate over all segments, detect their mapping (if we don't have
 	 * one yet), validate them and push everything one level higher.
 	 */
 	skb_queue_walk_safe(&sk->sk_receive_queue, skb, tmp) {
 		int ret;
+#ifdef AFR_OOO_RECEIVE_VERBOSE
+		printk("%s afr_ofo for sk %p walking skb %p with seq %u and end_seq %u and diff_seq %u\n", __func__, sk, skb, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq, TCP_SKB_CB(skb)->end_seq - TCP_SKB_CB(skb)->seq);
+#endif
 		/* Pre-validation - e.g., early fallback */
 		ret = mptcp_prevalidate_skb(sk, skb);
 		if (ret < 0)
 			goto restart;
 		else if (ret > 0)
 			break;
-
+#ifdef AFR_OOO_RECEIVE_VERBOSE
+		printk("%s afr_ofo prevalidation of skb %p successfull\n", __func__, skb);
+#endif
 		/* Set the current mapping */
 		ret = mptcp_detect_mapping(sk, skb);
 		if (ret < 0)
 			goto restart;
 		else if (ret > 0)
 			break;
-
+#ifdef AFR_OOO_RECEIVE_VERBOSE
+		printk("%s afr_ofo set mapping of skb %p successfull\n", __func__, skb);
+#endif
 		/* Validation */
 		if (mptcp_validate_mapping(sk, skb) < 0)
 			goto restart;
+#ifdef AFR_OOO_RECEIVE_VERBOSE
+		printk("%s afr_ofo validate mapping of skb %p successfull\n", __func__, skb);
+#endif
+		// some statistics
+		{
+			struct tcp_sock *tp = tcp_sk(sk);
+			tp->mptcp->bytes_rcv += skb->len;
+		}
 
+#ifdef AFR_OOO_RECEIVE_VERBOSE
+		printk("%s afr_ofo pushing a level higher\n", __func__);
+#endif
 		/* Push a level higher */
 		ret = mptcp_queue_skb(sk);
 		if (ret < 0) {
@@ -1072,14 +1315,30 @@ restart:
 		}
 	}
 
+	/* in the current implementation,
+	 * out of order packets of the subflow are not pushed
+	 * to the meta socket.
+	 *
+	 * There are 2 implementation alternatives:
+	 * 1. push all subflow ofos to the meta socket.
+	 * This implies a lot of ofos which would be solved by...
+	 * 2. only push a subflow ofo if it fits into the
+	 * meta socket receive queue.
+	 */
+	afr_ofo_push(sk);
+
 exit:
 	if (tcp_sk(sk)->close_it) {
 		tcp_send_ack(sk);
 		tcp_sk(sk)->ops->time_wait(sk, TCP_TIME_WAIT, 0);
 	}
 
-	if (queued == -1 && !sock_flag(meta_sk, SOCK_DEAD))
+	if (queued == -1 && !sock_flag(meta_sk, SOCK_DEAD)) {
+#ifdef AFR_OOO_RECEIVE_VERBOSE
+		printk("%s afr_ofo calls meta_sk->data_ready for meta_sk %p\n", __func__, meta_sk);
+#endif
 		meta_sk->sk_data_ready(meta_sk);
+	}
 }
 
 
@@ -1414,6 +1673,9 @@ void mptcp_fin(struct sock *meta_sk)
 	return;
 }
 
+void __mptcp_reinject_data(struct sk_buff *orig_skb, struct sock *meta_sk,
+				  struct sock *sk, int clone_it);
+
 static void mptcp_xmit_retransmit_queue(struct sock *meta_sk)
 {
 	struct tcp_sock *meta_tp = tcp_sk(meta_sk);
@@ -1423,11 +1685,30 @@ static void mptcp_xmit_retransmit_queue(struct sock *meta_sk)
 		return;
 
 	tcp_for_write_queue(skb, meta_sk) {
-		if (skb == tcp_send_head(meta_sk))
+		if (skb == tcp_send_head(meta_sk)) {
+			printk("%s breaks at skb %p = sk_send_head\n", __func__, skb);
 			break;
+		}
 
-		if (mptcp_retransmit_skb(meta_sk, skb))
-			return;
+		printk("mptcp_xmit_retransmit_queue retransmits skb %p\n", skb);
+
+		// rbs: check if we already sent this skb (not the data, the skb)
+		if (!tcp_skb_pcount(skb)) {
+			/* this is some kind of heritage... we put it in the reinject queue some days ago, but
+			   actually this situation should not occur...
+			   the current solution does not crash, but should not happen... therefore, print it */
+			printk("%s wants to retransmit skb %p with seq %u but no pcount... skip it\n", __func__, skb, TCP_SKB_CB(skb)->seq);
+		
+			// put it in reinjection queue would be "correct", however, than we would be out of order...
+			// maybe we will directly xmit it here...
+			// maybe we will remove it from sending queue, and continue without cloning...
+			//	mptcp_debug("rbs detected sk_send_head before unsent packets for retransmission of skb %p, put copy into reinjection queue\n", skb);
+			//	__mptcp_reinject_data(skb, meta_sk, NULL, 1);
+		} else {
+			// was already sent, so we can use retransmit...
+			if (mptcp_retransmit_skb(meta_sk, skb))
+				return;
+		}
 
 		if (skb == tcp_write_queue_head(meta_sk))
 			inet_csk_reset_xmit_timer(meta_sk, ICSK_TIME_RETRANS,
@@ -1439,13 +1720,27 @@ static void mptcp_xmit_retransmit_queue(struct sock *meta_sk)
 /* Handle the DATA_ACK */
 static void mptcp_data_ack(struct sock *sk, const struct sk_buff *skb)
 {
-	struct sock *meta_sk = mptcp_meta_sk(sk);
+	/*struct sock *meta_sk = mptcp_meta_sk(sk);
 	struct tcp_sock *meta_tp = tcp_sk(meta_sk), *tp = tcp_sk(sk);
 	struct tcp_skb_cb *tcb = TCP_SKB_CB(skb);
-	u32 prior_snd_una = meta_tp->snd_una;
+	u32 prior_snd_una = meta_tp->snd_una;*/
+	struct sock *meta_sk;
+	struct tcp_sock *meta_tp;
+	struct tcp_sock *tp;
+	struct tcp_skb_cb *tcb;
+	u32 prior_snd_una;
+
 	int prior_packets;
 	u32 nwin, data_ack, data_seq;
 	u16 data_len = 0;
+
+	meta_sk = mptcp_meta_sk(sk);
+	meta_tp = tcp_sk(meta_sk);
+	tp = tcp_sk(sk);
+	tcb = TCP_SKB_CB(skb);
+	prior_snd_una = meta_tp->snd_una;
+
+
 
 	/* A valid packet came in - subflow is operational again */
 	tp->pf = 0;
@@ -1524,12 +1819,18 @@ static void mptcp_data_ack(struct sock *sk, const struct sk_buff *skb)
 	inet_csk(meta_sk)->icsk_probes_out = 0;
 	meta_tp->rcv_tstamp = tcp_time_stamp;
 	prior_packets = meta_tp->packets_out;
+
+	if (meta_tp->mpcb->sched_ops->update_stats)
+		meta_tp->mpcb->sched_ops->update_stats(sk, skb, 0, 2);
+
 	if (!prior_packets)
 		goto no_queue;
 
 	meta_tp->snd_una = data_ack;
 
+	mptcp_debug("now going to mptcp_clean_rtx_queue for meta_sk %p with prior_snd_una %u\n", meta_sk, prior_snd_una);
 	mptcp_clean_rtx_queue(meta_sk, prior_snd_una);
+	mptcp_debug("we are back from cleaning\n");
 
 	/* We are in loss-state, and something got acked, retransmit the whole
 	 * queue now!
@@ -2146,6 +2447,9 @@ int mptcp_handle_options(struct sock *sk, const struct tcphdr *th,
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct mptcp_options_received *mopt = &tp->mptcp->rx_opt;
+	
+	if (tp->mpcb->sched_ops->update_stats)
+		tp->mpcb->sched_ops->update_stats(sk, skb, 0, 2);
 
 	if (tp->mpcb->infinite_mapping_rcv || tp->mpcb->infinite_mapping_snd)
 		return 0;

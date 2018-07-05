@@ -117,7 +117,7 @@ void tcp_time_wait(struct sock *sk, int state, int timeo);
 #define TCP_TIMEWAIT_LEN (60*HZ) /* how long to wait to destroy TIME-WAIT
 				  * state, about 60 seconds	*/
 #define TCP_FIN_TIMEOUT	TCP_TIMEWAIT_LEN
-                                 /* BSD style FIN_WAIT2 deadlock breaker.
+				 /* BSD style FIN_WAIT2 deadlock breaker.
 				  * It used to be 3min, new value is 60sec,
 				  * to combine FIN-WAIT-2 timeout with
 				  * TIME-WAIT timer.
@@ -142,8 +142,8 @@ void tcp_time_wait(struct sock *sk, int state, int timeo);
 						 */
 
 #define TCP_RESOURCE_PROBE_INTERVAL ((unsigned)(HZ/2U)) /* Maximal interval between probes
-					                 * for local resources.
-					                 */
+							 * for local resources.
+							 */
 
 #define TCP_KEEPALIVE_TIME	(120*60*HZ)	/* two hours */
 #define TCP_KEEPALIVE_PROBES	9		/* Max of 9 keepalive probes	*/
@@ -315,7 +315,7 @@ extern int tcp_memory_pressure;
 
 static inline bool before(__u32 seq1, __u32 seq2)
 {
-        return (__s32)(seq1-seq2) < 0;
+	return (__s32)(seq1-seq2) < 0;
 }
 #define after(seq2, seq1) 	before(seq1, seq2)
 
@@ -438,7 +438,7 @@ void inet6_sk_rx_dst_set(struct sock *sk, const struct sk_buff *skb);
 void tcp_v6_hash(struct sock *sk);
 struct sock *tcp_v6_hnd_req(struct sock *sk,struct sk_buff *skb);
 struct sock *tcp_v6_syn_recv_sock(struct sock *sk, struct sk_buff *skb,
-			          struct request_sock *req,
+				  struct request_sock *req,
 				  struct dst_entry *dst);
 void tcp_v6_reqsk_destructor(struct request_sock *req);
 
@@ -821,6 +821,16 @@ static inline u32 tcp_skb_timestamp(const struct sk_buff *skb)
 #define TCPHDR_ECE 0x40
 #define TCPHDR_CWR 0x80
 
+union tcp_skb_cb_rbs {
+	struct {
+		__u8	flags_to_unlink:1,
+			flags_to_free:1,
+			flags_not_in_queue:1,
+			user:5;
+	};
+	__u8 b;
+};
+
 /* This is what the send packet queuing engine uses to pass
  * TCP per-packet control information to the transmission code.
  * We also store the host-order sequence numbers in here too.
@@ -845,6 +855,7 @@ struct tcp_skb_cb {
 	__u8		mptcp_flags;	/* flags for the MPTCP layer    */
 	__u8		dss_off;	/* Number of 4-byte words until
 					 * seq-number */
+	union tcp_skb_cb_rbs mptcp_rbs;
 #endif
 	__u8		tcp_flags;	/* TCP header flags. (tcp[13])	*/
 
@@ -1577,6 +1588,13 @@ static inline bool tcp_skb_is_last(const struct sock *sk,
 				   const struct sk_buff *skb)
 {
 	return skb_queue_is_last(&sk->sk_write_queue, skb);
+}
+
+// added for rbs
+static inline bool tcp_skb_is_first(const struct sock *sk,
+				   const struct sk_buff *skb)
+{
+	return skb_queue_is_first(&sk->sk_write_queue, skb);
 }
 
 static inline void tcp_advance_send_head(struct sock *sk, const struct sk_buff *skb)

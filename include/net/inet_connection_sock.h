@@ -222,7 +222,8 @@ static inline void inet_csk_reset_xmit_timer(struct sock *sk, const int what,
 					     const unsigned long max_when)
 {
 	struct inet_connection_sock *icsk = inet_csk(sk);
-
+	//printk("AFR AFR reset_xmit_timer: sk=%p %d when=0x%lx, caller=%p\n",
+	//			 sk, what, when, current_text_addr());
 	if (when > max_when) {
 #ifdef INET_CSK_DEBUG
 		pr_debug("reset_xmit_timer: sk=%p %d when=0x%lx, caller=%p\n",
