@@ -145,10 +145,6 @@ static void __mptcp_reinject_data(struct sk_buff *orig_skb, struct sock *meta_sk
 
 	skb->sk = meta_sk;
 
-	/* Reset subflow-specific TCP control-data */
-	TCP_SKB_CB(skb)->sacked = 0;
-	TCP_SKB_CB(skb)->tcp_flags &= (TCPHDR_ACK | TCPHDR_PSH);
-
 	/* If it reached already the destination, we don't have to reinject it */
 	if (!after(TCP_SKB_CB(skb)->end_seq, meta_tp->snd_una)) {
 		__kfree_skb(skb);
@@ -478,7 +474,10 @@ static bool mptcp_skb_entail(struct sock *sk, struct sk_buff *skb, int reinject)
 	mptcp_save_dss_data_seq(tp, subskb);
 
 	tcb->seq = tp->write_seq;
-
+	tcb->sacked = 0; /* reset the sacked field: from the point of view
+			  * of this subflow, we are sending a brand new
+			  * segment
+			  */
 	/* Take into account seg len */
 	tp->write_seq += subskb->len + ((tcb->tcp_flags & TCPHDR_FIN) ? 1 : 0);
 	tcb->end_seq = tp->write_seq;
@@ -589,9 +588,6 @@ int mptcp_write_wakeup(struct sock *meta_sk, int mib)
 		unsigned int seg_size = tcp_wnd_end(meta_tp) - TCP_SKB_CB(skb)->seq;
 		struct sock *subsk = meta_tp->mpcb->sched_ops->get_subflow(meta_sk, skb, true);
 		struct tcp_sock *subtp;
-
-		WARN_ON(TCP_SKB_CB(skb)->sacked);
-
 		if (!subsk)
 			goto window_probe;
 		subtp = tcp_sk(subsk);
@@ -629,7 +625,6 @@ int mptcp_write_wakeup(struct sock *meta_sk, int mib)
 		tcp_event_new_data_sent(meta_sk, skb);
 
 		__tcp_push_pending_frames(subsk, mss, TCP_NAGLE_PUSH);
-		meta_tp->lsndtime = tcp_time_stamp;
 
 		return 0;
 	} else {
@@ -671,9 +666,6 @@ bool mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 	while ((skb = mpcb->sched_ops->next_segment(meta_sk, &reinject, &subsk,
 						    &sublimit))) {
 		unsigned int limit;
-
-		WARN(TCP_SKB_CB(skb)->sacked, "sacked: %u reinject: %u",
-		     TCP_SKB_CB(skb)->sacked, reinject);
 
 		subtp = tcp_sk(subsk);
 		mss_now = tcp_current_mss(subsk);
@@ -750,8 +742,6 @@ bool mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 		 * always push on the subflow
 		 */
 		__tcp_push_pending_frames(subsk, mss_now, TCP_NAGLE_PUSH);
-		meta_tp->lsndtime = tcp_time_stamp;
-
 		path_mask |= mptcp_pi_to_flag(subtp->mptcp->path_index);
 		skb_mstamp_get(&skb->skb_mstamp);
 
@@ -989,10 +979,8 @@ void mptcp_established_options(struct sock *sk, struct sk_buff *skb,
 		*size += MPTCP_SUB_LEN_JOIN_ACK_ALIGN;
 	}
 
-	if (unlikely(mpcb->addr_signal) && mpcb->pm_ops->addr_signal &&
-	    mpcb->mptcp_ver >= MPTCP_VERSION_1 && skb && !mptcp_is_data_seq(skb)) {
+	if (unlikely(mpcb->addr_signal) && mpcb->pm_ops->addr_signal) {
 		mpcb->pm_ops->addr_signal(sk, size, opts, skb);
-
 		if (opts->add_addr_v6)
 			/* Skip subsequent options */
 			return;
@@ -1026,10 +1014,6 @@ void mptcp_established_options(struct sock *sk, struct sk_buff *skb,
 		opts->mptcp_options |= OPTION_MP_FAIL;
 		*size += MPTCP_SUB_LEN_FAIL;
 	}
-
-	if (unlikely(mpcb->addr_signal) && mpcb->pm_ops->addr_signal &&
-	    mpcb->mptcp_ver < MPTCP_VERSION_1)
-		mpcb->pm_ops->addr_signal(sk, size, opts, skb);
 
 	if (unlikely(tp->mptcp->send_mp_prio) &&
 	    MAX_TCP_OPTION_SPACE - *size >= MPTCP_SUB_LEN_PRIO_ALIGN) {
@@ -1305,13 +1289,10 @@ void mptcp_send_active_reset(struct sock *meta_sk, gfp_t priority)
 
 	mptcp_sub_force_close_all(mpcb, sk);
 
-	tcp_set_state(sk, TCP_RST_WAIT);
-
 	if (!in_serving_softirq())
 		local_bh_enable();
 
 	tcp_send_ack(sk);
-	tcp_clear_xmit_timers(sk);
 	inet_csk_reset_keepalive_timer(sk, inet_csk(sk)->icsk_rto);
 
 	meta_tp->send_mp_fclose = 1;
@@ -1418,8 +1399,6 @@ int mptcp_retransmit_skb(struct sock *meta_sk, struct sk_buff *skb)
 	unsigned int limit, mss_now;
 	int err = -1;
 
-	WARN_ON(TCP_SKB_CB(skb)->sacked);
-
 	/* Do not sent more than we queued. 1/4 is reserved for possible
 	 * copying overhead: fragmentation, tunneling, mangling etc.
 	 *
@@ -1483,7 +1462,6 @@ int mptcp_retransmit_skb(struct sock *meta_sk, struct sk_buff *skb)
 		meta_tp->retrans_stamp = tcp_skb_timestamp(skb);
 
 	__tcp_push_pending_frames(subsk, mss_now, TCP_NAGLE_PUSH);
-	meta_tp->lsndtime = tcp_time_stamp;
 
 	return 0;
 

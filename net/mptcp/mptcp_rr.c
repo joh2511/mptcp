@@ -2,6 +2,7 @@
 
 #include <linux/module.h>
 #include <net/mptcp.h>
+#include <asm/msr.h>
 
 static unsigned char num_segments __read_mostly = 1;
 module_param(num_segments, byte, 0644);
@@ -171,11 +172,17 @@ static struct sk_buff *__mptcp_rr_next_segment(const struct sock *meta_sk, int *
 	return skb;
 }
 
+u64 total_rr_time_skb;
+u64 total_rr_time_no_skb;
+u64 total_rr_count_skb;
+u64 total_rr_count_no_skb;
+
 static struct sk_buff *mptcp_rr_next_segment(struct sock *meta_sk,
 					     int *reinject,
 					     struct sock **subsk,
 					     unsigned int *limit)
 {
+	u64 begin_time = __native_read_tsc();
 	const struct mptcp_cb *mpcb = tcp_sk(meta_sk)->mpcb;
 	struct sock *sk_it, *choose_sk = NULL;
 	struct sk_buff *skb = __mptcp_rr_next_segment(meta_sk, reinject);
@@ -185,13 +192,23 @@ static struct sk_buff *mptcp_rr_next_segment(struct sock *meta_sk,
 	/* As we set it, we have to reset it as well. */
 	*limit = 0;
 
-	if (!skb)
+	if (!skb) {
+		total_rr_time_no_skb += __native_read_tsc() - begin_time;
+		total_rr_count_no_skb++;
 		return NULL;
+	}
 
 	if (*reinject) {
 		*subsk = rr_get_available_subflow(meta_sk, skb, false);
-		if (!*subsk)
+		if (!*subsk) {
+			total_rr_time_no_skb += __native_read_tsc() - begin_time;
+			total_rr_count_no_skb++;
+
 			return NULL;
+		}
+
+		total_rr_time_skb += __native_read_tsc() - begin_time;
+		total_rr_count_skb++;
 
 		return skb;
 	}
@@ -252,8 +269,12 @@ found:
 		struct tcp_sock *choose_tp = tcp_sk(choose_sk);
 		struct rrsched_priv *rsp = rrsched_get_priv(choose_tp);
 
-		if (!mptcp_rr_is_available(choose_sk, skb, false, true))
+		if (!mptcp_rr_is_available(choose_sk, skb, false, true)) {
+			total_rr_time_no_skb += __native_read_tsc() - begin_time;
+			total_rr_count_no_skb++;
+
 			return NULL;
+		}
 
 		*subsk = choose_sk;
 		mss_now = tcp_current_mss(*subsk);
@@ -264,8 +285,14 @@ found:
 		else
 			rsp->quota++;
 
+		total_rr_time_skb += __native_read_tsc() - begin_time;
+		total_rr_count_skb++;
+
 		return skb;
 	}
+
+	total_rr_time_no_skb += __native_read_tsc() - begin_time;
+	total_rr_count_no_skb++;
 
 	return NULL;
 }

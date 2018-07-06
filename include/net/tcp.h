@@ -851,6 +851,16 @@ static inline u32 tcp_skb_timestamp(const struct sk_buff *skb)
 
 #define TCPHDR_SYN_ECN	(TCPHDR_SYN | TCPHDR_ECE | TCPHDR_CWR)
 
+union tcp_skb_cb_rbs {
+	struct {
+		__u8	flags_to_unlink:1,
+			flags_to_free:1,
+			flags_not_in_queue:1,
+			user:5;
+	};
+	__u8 b;
+};
+
 /* This is what the send packet queuing engine uses to pass
  * TCP per-packet control information to the transmission code.
  * We also store the host-order sequence numbers in here too.
@@ -878,6 +888,7 @@ struct tcp_skb_cb {
 	__u8		mptcp_flags;	/* flags for the MPTCP layer    */
 	__u8		dss_off;	/* Number of 4-byte words until
 					 * seq-number */
+	union tcp_skb_cb_rbs mptcp_rbs;
 #endif
 	__u8		tcp_flags;	/* TCP header flags. (tcp[13])	*/
 
@@ -1721,6 +1732,13 @@ static inline bool tcp_skb_is_last(const struct sock *sk,
 				   const struct sk_buff *skb)
 {
 	return skb_queue_is_last(&sk->sk_write_queue, skb);
+}
+
+// added for rbs
+static inline bool tcp_skb_is_first(const struct sock *sk,
+				   const struct sk_buff *skb)
+{
+	return skb_queue_is_first(&sk->sk_write_queue, skb);
 }
 
 static inline void tcp_advance_send_head(struct sock *sk, const struct sk_buff *skb)

@@ -283,6 +283,9 @@
 #include <asm/unaligned.h>
 #include <net/busy_poll.h>
 
+#include "../mptcp/mptcp_rbs_sched.h"
+#include "../mptcp/mptcp_rbs_scheduler.h"
+
 int sysctl_tcp_min_tso_segs __read_mostly = 2;
 
 int sysctl_tcp_autocorking __read_mostly = 1;
@@ -643,6 +646,36 @@ static void skb_entail(struct sock *sk, struct sk_buff *skb)
 	if (tp->nonagle & TCP_NAGLE_PUSH)
 		tp->nonagle &= ~TCP_NAGLE_PUSH;
 
+	/* RBS specific stuff */
+	if (mptcp(tp)) {
+		/* note: only the meta_sk should be used for this*/
+		if (tp->mpcb->meta_sk == (struct sock *) tp) {
+			struct tcp_sock *meta_tp = tcp_sk(sk);
+
+			/* are we using rbs? */
+			if (mptcp_rbs_is_sched_used(meta_tp)) {
+				struct mptcp_rbs_cb *rbs_cb =
+				    mptcp_rbs_get_cb(meta_tp);
+
+				if (rbs_cb->queue_position == NULL) {
+					rbs_cb->queue_position = skb;
+					mptcp_debug("rbs corrects queue "
+						    "position, before NULL, "
+						    "now %p\n",
+						    skb);
+				} else {
+					mptcp_debug(
+					    "rbs no need to correct queue "
+					    "position, remains with %p, not "
+					    "switched to %p\n",
+					    rbs_cb->queue_position, skb);
+				}
+			}
+		} else {
+			printk("avoided bug at the airport 2\n");
+		}
+	}
+	/* RBS specific stuff END */
 	tcp_slow_start_after_idle_check(sk);
 }
 
@@ -1293,6 +1326,33 @@ new_segment:
 				skb->ip_summed = CHECKSUM_PARTIAL;
 
 			skb_entail(sk, skb);
+
+			/* RBS specific stuff to set skb props*/
+			if (mptcp(tp)) {
+				/* note: only the meta_sk should be used for
+				 * this*/
+				if (tp->mpcb->meta_sk == (struct sock *) tp) {
+					struct tcp_sock *meta_tp = tcp_sk(sk);
+
+					/* are we using rbs? */
+					if (mptcp_rbs_is_sched_used(meta_tp)) {
+						struct mptcp_rbs_cb *rbs_cb =
+						    mptcp_rbs_get_cb(meta_tp);
+
+						mptcp_debug(
+						    "setting skb->mptcp_rbs "
+						    "with %i for %p with size "
+						    "of tcp_skb_cb %lu\n",
+						    TCP_SKB_CB(skb)->mptcp_rbs.user,
+						    skb,
+						    sizeof(struct tcp_skb_cb));
+						TCP_SKB_CB(skb)->mptcp_rbs.user =
+						    rbs_cb->skb_prop;
+					}
+				}
+			}
+			/* RBS specific stuff END */
+
 			copy = size_goal;
 			max = size_goal;
 
@@ -2522,31 +2582,49 @@ static int do_tcp_setsockopt(struct sock *sk, int level,
 	}
 #ifdef CONFIG_MPTCP
 	case MPTCP_SCHEDULER: {
-		char name[MPTCP_SCHED_NAME_MAX];
-
-		if (optlen < 1)
-			return -EINVAL;
-
-		/* Cannot be used if MPTCP is not used or we already have
-		 * established an MPTCP-connection.
-		 */
-		if (mptcp_init_failed || !sysctl_mptcp_enabled ||
-		    sk->sk_state != TCP_CLOSE)
-			return -EPERM;
-
-		val = strncpy_from_user(name, optval,
-					min_t(long, MPTCP_SCHED_NAME_MAX - 1,
-					      optlen));
-
-		if (val < 0)
-			return -EFAULT;
-		name[val] = 0;
-
 		lock_sock(sk);
-		err = mptcp_set_scheduler(sk, name);
+
+		if (mptcp_init_failed || !sysctl_mptcp_enabled ||
+		    !mptcp_rbs_is_sched_used(tp)) {
+			err = -EPERM;
+		} else if (optlen == 0) {
+			if (!mptcp_rbs_scheduler_set(sk, NULL))
+				err = -EINVAL;
+		} else if (optlen >= 256) {
+			err = -EINVAL;
+		} else {
+			char data[256];
+			memset(data, 0, sizeof(data));
+
+			val = strncpy_from_user(data, optval, optlen);
+			if (val < 0)
+				err = -EFAULT;
+			else if (!mptcp_rbs_scheduler_set(sk, data))
+				err = -EINVAL;
+		}
+
 		release_sock(sk);
 		return err;
 	}
+	case MPTCP_SCHEDULER_REG: {
+		lock_sock(sk);
+		if (mptcp_init_failed || !sysctl_mptcp_enabled ||
+		    !mptcp_rbs_is_sched_used(tp)) {
+			err = -EPERM;
+		} else if (optlen != sizeof(struct mptcp_rbs_reg_value)) {
+			err = -EINVAL;
+		} else {
+			struct mptcp_rbs_reg_value reg_value;
+
+			val =
+			    copy_from_user(&reg_value, optval,
+					   sizeof(struct mptcp_rbs_reg_value));
+			if (val < 0)
+				err = -EFAULT;
+			else if (!mptcp_rbs_reg_value_set(tp,
+							  &reg_value))
+				err = -EINVAL;
+		}
 
 	case MPTCP_PATH_MANAGER: {
 		char name[MPTCP_PM_NAME_MAX];
@@ -2616,7 +2694,20 @@ static int do_tcp_setsockopt(struct sock *sk, int level,
 			tp->nonagle &= ~TCP_NAGLE_OFF;
 		}
 		break;
-
+#ifdef CONFIG_MPTCP
+	case MPTCP_RBS_SKB_PROP: {
+		if (mptcp_init_failed || !sysctl_mptcp_enabled ||
+		    !mptcp_rbs_is_sched_used(tp)) {
+			err = -EPERM;
+		} else if (val < 0) {
+			err = -EFAULT;
+		} else if (val >= 0 && val <= 0x20) { // we only have 5 bit
+			mptcp_rbs_get_cb(tp)->skb_prop = val;
+		} else
+			err = -EINVAL;
+		break;
+	}
+#endif
 	case TCP_THIN_LINEAR_TIMEOUTS:
 		if (val < 0 || val > 1)
 			err = -EINVAL;
@@ -3200,25 +3291,26 @@ static int do_tcp_getsockopt(struct sock *sk, int level,
 		return 0;
 	}
 #ifdef CONFIG_MPTCP
-	case MPTCP_SCHEDULER:
+	case MPTCP_SCHEDULER: 
+	{
+		const char *str = "";
+		struct tcp_sock *tp = tcp_sk(sk);
+
 		if (get_user(len, optlen))
 			return -EFAULT;
-		len = min_t(unsigned int, len, MPTCP_SCHED_NAME_MAX);
+
+		if (!mptcp_init_failed && sysctl_mptcp_enabled &&
+		    mptcp_rbs_is_sched_used(tp))
+			str = mptcp_rbs_scheduler_get(sk)->name;
+
+		len = min_t(unsigned int, len, strlen(str));
+
 		if (put_user(len, optlen))
 			return -EFAULT;
-
-		if (mptcp(tcp_sk(sk))) {
-			struct mptcp_cb *mpcb = tcp_sk(mptcp_meta_sk(sk))->mpcb;
-
-			if (copy_to_user(optval, mpcb->sched_ops->name, len))
-				return -EFAULT;
-		} else {
-			if (copy_to_user(optval, tcp_sk(sk)->mptcp_sched_name,
-					 len))
-				return -EFAULT;
-		}
+		if (copy_to_user(optval, str, len))
+			return -EFAULT;
 		return 0;
-
+	}
 	case MPTCP_PATH_MANAGER:
 		if (get_user(len, optlen))
 			return -EFAULT;

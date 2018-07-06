@@ -123,9 +123,11 @@ enum {
 #define TCP_SAVED_SYN		28	/* Get SYN headers recorded for connection */
 #define TCP_REPAIR_WINDOW	29	/* Get/set window parameters */
 #define MPTCP_ENABLED		42
-#define MPTCP_SCHEDULER		43
-#define MPTCP_PATH_MANAGER	44
-#define MPTCP_INFO		45
+#define MPTCP_SCHEDULER		44
+#define MPTCP_SCHEDULER_REG	45
+#define MPTCP_RBS_SKB_PROP	46
+#define MPTCP_PATH_MANAGER	47
+#define MPTCP_INFO		48
 
 #define MPTCP_INFO_FLAG_SAVE_MASTER	0x01
 
