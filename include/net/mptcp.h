@@ -191,7 +191,7 @@ struct mptcp_tcp_sock {
 	u8	loc_id;
 	u8	rem_id;
 
-#define MPTCP_SCHED_SIZE 16
+#define MPTCP_SCHED_SIZE 64
 	u8	mptcp_sched[MPTCP_SCHED_SIZE] __aligned(8);
 
 	struct sk_buff  *shortcut_ofoqueue; /* Shortcut to the current modified
@@ -210,6 +210,17 @@ struct mptcp_tcp_sock {
 
 	/* HMAC of the third ack */
 	char sender_mac[20];
+
+	/* statistics for amiusing */
+	u64 bytes_snd;
+	u64 bytes_rcv;
+
+	/* Delay measurement values */
+	u32 delay_in;
+	u32 delay_out;
+
+	/* counter for unique subflow ids */
+	u8 sbf_id;
 };
 
 struct mptcp_tw {
@@ -260,6 +271,23 @@ struct mptcp_sched_ops {
 
 	char			name[MPTCP_SCHED_NAME_MAX];
 	struct module		*owner;
+	void 			(*recover_skb) (struct sock *meta_sk,
+						struct sock *subsk,
+						struct sk_buff* skb,
+						bool reinject);
+	void 			(*update_stats) (struct sock * subsk,
+						 const struct sk_buff *skb,
+						 unsigned int len,
+						 unsigned int type);
+};
+
+/* scheduler selection for <dst ip> <src port> <till> */
+struct mptcp_sched_select {
+	struct list_head list;
+	__be32 dstip;
+	__be16 sport;
+	unsigned long till_time_s;
+	struct mptcp_sched_ops* sched_ops;
 };
 
 struct mptcp_cb {
@@ -289,7 +317,7 @@ struct mptcp_cb {
 	u8 cnt_subflows;
 	u8 cnt_established;
 
-#define MPTCP_SCHED_DATA_SIZE 8
+#define MPTCP_SCHED_DATA_SIZE 128
 	u8 mptcp_sched[MPTCP_SCHED_DATA_SIZE] __aligned(8);
 	struct mptcp_sched_ops *sched_ops;
 
@@ -348,6 +376,9 @@ struct mptcp_cb {
 	int orig_sk_rcvbuf;
 	int orig_sk_sndbuf;
 	u32 orig_window_clamp;
+
+	/* counter for unique subflow ids */
+	u8 last_sbf_id;
 };
 
 #define MPTCP_VERSION_0 0
@@ -909,9 +940,12 @@ extern struct mptcp_pm_ops mptcp_pm_default;
 int mptcp_register_scheduler(struct mptcp_sched_ops *sched);
 void mptcp_unregister_scheduler(struct mptcp_sched_ops *sched);
 void mptcp_init_scheduler(struct mptcp_cb *mpcb);
+struct mptcp_sched_ops *mptcp_sched_find(const char *name);
 void mptcp_cleanup_scheduler(struct mptcp_cb *mpcb);
 void mptcp_get_default_scheduler(char *name);
 int mptcp_set_default_scheduler(const char *name);
+int mptcp_set_default_scheduler_for_tuple(const char *name, __be32 dstip,
+								__be16 sport, unsigned long till_jiffies);
 bool mptcp_is_available(struct sock *sk, const struct sk_buff *skb,
 			bool zero_wnd_test);
 bool mptcp_is_def_unavailable(struct sock *sk);
@@ -1348,6 +1382,8 @@ void mptcp_tcp_set_rto(struct sock *sk);
 
 /* TCP and MPTCP flag-depending functions */
 bool mptcp_prune_ofo_queue(struct sock *sk);
+
+#define MPTCP_SCHED_MAX_DATA_LEN 1024
 
 #else /* CONFIG_MPTCP */
 #define mptcp_debug(fmt, args...)	\

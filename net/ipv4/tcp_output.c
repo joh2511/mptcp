@@ -48,6 +48,9 @@
 #include <linux/gfp.h>
 #include <linux/module.h>
 
+
+#include "../mptcp/mptcp_rbs_sched.h"
+
 /* People can turn this off for buggy TCP's found in printers etc. */
 int sysctl_tcp_retrans_collapse __read_mostly = 1;
 
@@ -1085,6 +1088,27 @@ void tcp_queue_skb(struct sock *sk, struct sk_buff *skb)
 	tcp_add_write_queue_tail(sk, skb);
 	sk->sk_wmem_queued += skb->truesize;
 	sk_mem_charge(sk, skb->truesize);
+
+	/*  specific stuff */
+	if(mptcp(tp)) {
+		/* note: only the meta_sk should be used for this*/
+		if(tp->mpcb->meta_sk == (struct sock *) tp) {
+			struct tcp_sock *meta_tp = tcp_sk(sk);
+
+			/* are we using rbs? */
+			if (mptcp_rbs_is_sched_used(meta_tp)) {
+				struct mptcp_rbs_cb* rbs_cb = mptcp_rbs_get_cb(meta_tp);
+
+				if(rbs_cb->queue_position == NULL) {
+					rbs_cb->queue_position = skb;
+					mptcp_debug("rbs corrects queue position, before NULL, now %p\n", skb);
+				} else {
+					mptcp_debug("rbs no need to correct queue position, remains with %p, not switched to %p\n", rbs_cb->queue_position, skb);
+				}
+			}
+		}
+	}
+	/* RBS specific stuff END */
 }
 
 /* Initialize TSO segments for a packet. */
@@ -1255,7 +1279,47 @@ int tcp_fragment(struct sock *sk, struct sk_buff *skb, u32 len,
 
 	/* Link BUFF into the send queue. */
 	__skb_header_release(buff);
+	// rbs debug stuff
+	//printk("calling tcp_insert_write_queue_after with skb %p, skb->next %p, skb->prev %p, buff %p, buf->next %p, buf->prev %p for sk %p\n", skb, skb->next, skb->prev, buff, buff->next, buff->prev, sk);
+	if(!skb) {
+		printk("fragement found skb as null\n");
+	}
+
+	if(!skb->next) {
+		printk("fragement found skb->next as null for skb %p\n", skb);
+	}
+
 	tcp_insert_write_queue_after(skb, buff, sk);
+
+	/* RBS specific stuff */
+	/* note: only the meta_sk should be used for this*/
+	if(mptcp(tp) && tp->mpcb->meta_sk == (struct sock *) tp) {
+		struct tcp_sock *meta_tp = tcp_sk(sk);
+
+		/* are we using rbs? */
+		if (mptcp_rbs_is_sched_used(meta_tp)) {
+			struct mptcp_rbs_cb* rbs_cb = mptcp_rbs_get_cb(meta_tp);
+
+			if (!rbs_cb->queue_position) {
+				rbs_cb->queue_position = buff;
+				mptcp_debug("rbs corrects queue position, before NULL, now %p\n", buff);
+			} else {
+				// TODO: semantisch ist das kritisch...
+				// wenn der queue pointer VOR dieses packet zeigt, machen wir nichts, da wir spaeter ohnehin auf dieses packet zeigen
+				// wenn der queue pointer HINTER dieses packet zeigt, ziehen wir ihn wieder nach vorne...
+				// ggf. waere das hier auch ein fall fuer eine open action...
+				mptcp_debug("comparing seq numbers for correcting queue new packet %u and current queue %u\n", TCP_SKB_CB(buff)->seq, TCP_SKB_CB(rbs_cb->queue_position)->seq);
+
+				if (before(TCP_SKB_CB(buff)->seq, TCP_SKB_CB(rbs_cb->queue_position)->seq)) {
+					mptcp_debug("rbs corrects queue position, before %p, now %p\n", rbs_cb->queue_position, buff);
+					rbs_cb->queue_position = buff;
+				} else {
+					mptcp_debug("rbs no need to correct queue position, remains with %p, not switched to %p\n", rbs_cb->queue_position, buff);
+				}
+			}
+		}
+	}
+	/* RBS specific stuff END */
 
 	return 0;
 }
@@ -2110,6 +2174,19 @@ bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 			if (push_one == 2)
 				/* Force out a loss probe pkt. */
 				cwnd_quota = 1;
+			else if(mptcp(tp) && 
+				/* is a subflow */
+				tp->mpcb->meta_sk != (struct sock *) tp && 
+				/* uses RBS */
+				mptcp_rbs_is_sched_used((struct tcp_sock*) tp->mpcb->meta_sk) &&
+				ignoreSbfCwndConfig) 
+			{
+				/*
+				 * RBS does not need a cwnd check for subflows
+				 */
+				mptcp_debug("%s overruled congestion control for meta_sk %p, setting cwnd_quota = 1\n", __func__, tp->mpcb->meta_sk);
+				cwnd_quota = 1;
+			}
 			else
 				break;
 		}
@@ -2153,6 +2230,11 @@ bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 		 */
 		limit = max(2 * skb->truesize, sk->sk_pacing_rate >> 10);
 		limit = min_t(u32, limit, sysctl_tcp_limit_output_bytes);
+
+/*		if(mptcp(tp)) {
+			printk("AFR_TSQ checks with limit %d and sysvalue %d and truesize %d against value sk_wmem atomic %d\n",
+				limit, sysctl_tcp_limit_output_bytes, 2* skb->truesize, atomic_read(&sk->sk_wmem_alloc));
+		}*/
 
 		if (atomic_read(&sk->sk_wmem_alloc) > limit) {
 			set_bit(TSQ_THROTTLED, &tp->tsq_flags);

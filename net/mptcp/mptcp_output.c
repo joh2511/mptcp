@@ -35,6 +35,7 @@
 #include <net/mptcp_v4.h>
 #include <net/mptcp_v6.h>
 #include <net/sock.h>
+#include "mptcp_rbs_queue.h"
 
 static const int mptcp_dss_len = MPTCP_SUB_LEN_DSS_ALIGN +
 				 MPTCP_SUB_LEN_ACK_ALIGN +
@@ -97,10 +98,23 @@ static bool mptcp_is_reinjected(const struct sk_buff *skb)
 static void mptcp_find_and_set_pathmask(const struct sock *meta_sk, struct sk_buff *skb)
 {
 	struct sk_buff *skb_it;
-
+	u32 counter = 0;
 	skb_it = tcp_write_queue_head(meta_sk);
 
 	tcp_for_write_queue_from(skb_it, meta_sk) {
+		counter++;
+
+		if(counter == 1000) {
+			/*printk("%s called more than %u times with qlen %u for seq %u... we break at 100 000\n", __func__, counter, meta_sk->sk_write_queue.qlen, TCP_SKB_CB(skb)->seq);
+			printk("Caller is %pS\n", __builtin_return_address(0));
+			printk("Callerer is %pS\n", __builtin_return_address(1));*/
+		}
+
+		if(counter > 1000 * 100) {
+			printk("ProgMP: %s breaking with %u and qlen %u\n", __func__, counter, meta_sk->sk_write_queue.qlen);
+			break;
+		}
+
 		if (skb_it == tcp_send_head(meta_sk))
 			break;
 
@@ -114,7 +128,7 @@ static void mptcp_find_and_set_pathmask(const struct sock *meta_sk, struct sk_bu
 /* Reinject data from one TCP subflow to the meta_sk. If sk == NULL, we are
  * coming from the meta-retransmit-timer
  */
-static void __mptcp_reinject_data(struct sk_buff *orig_skb, struct sock *meta_sk,
+void __mptcp_reinject_data(struct sk_buff *orig_skb, struct sock *meta_sk,
 				  struct sock *sk, int clone_it)
 {
 	struct sk_buff *skb, *skb1;
@@ -123,11 +137,27 @@ static void __mptcp_reinject_data(struct sk_buff *orig_skb, struct sock *meta_sk
 	u32 seq, end_seq;
 
 	if (clone_it) {
+		mptcp_debug("%s going to clone %p for rq %p\n", __func__, orig_skb, &mpcb->reinject_queue);
 		/* pskb_copy is necessary here, because the TCP/IP-headers
 		 * will be changed when it's going to be reinjected on another
 		 * subflow.
 		 */
+
 		skb = pskb_copy_for_clone(orig_skb, GFP_ATOMIC);
+
+		/* afr added this as the cloned skb might be null and comparing rbs leads to null pointer otherwise */
+		if (unlikely(!skb)) {
+			printk("%s failed cloning sb %p\n", __func__, orig_skb);
+			return;
+		}
+
+		if (TCP_SKB_CB(orig_skb)->mptcp_rbs.user != TCP_SKB_CB(skb)->mptcp_rbs.user) {
+			printk("cloning skb %p with rbs %i leads to rbs %i\n", orig_skb, TCP_SKB_CB(orig_skb)->mptcp_rbs.user, TCP_SKB_CB(skb)->mptcp_rbs.user);
+			BUG();
+		}
+
+//		mptcp_debug("%s cloned %p and got %p with not_in_queue %u and not_in_queue %u\n", __func__, orig_skb, skb,
+//				TCP_SKB_CB(orig_skb)->mptcp_rbs_flags_not_in_queue, TCP_SKB_CB(skb)->mptcp_rbs_flags_not_in_queue);
 	} else {
 		__skb_unlink(orig_skb, &sk->sk_write_queue);
 		sock_set_flag(sk, SOCK_QUEUE_SHRUNK);
@@ -138,6 +168,9 @@ static void __mptcp_reinject_data(struct sk_buff *orig_skb, struct sock *meta_sk
 	if (unlikely(!skb))
 		return;
 
+	/* now it is in the queue again */
+	TCP_SKB_CB(skb)->mptcp_rbs.flags_not_in_queue = 0;
+
 	if (sk && !mptcp_reconstruct_mapping(skb)) {
 		__kfree_skb(skb);
 		return;
@@ -145,9 +178,14 @@ static void __mptcp_reinject_data(struct sk_buff *orig_skb, struct sock *meta_sk
 
 	skb->sk = meta_sk;
 
+	/* Reset subflow-specific TCP control-data */
+	TCP_SKB_CB(skb)->sacked = 0;
+	TCP_SKB_CB(skb)->tcp_flags &= (TCPHDR_ACK | TCPHDR_PSH);
+
 	/* If it reached already the destination, we don't have to reinject it */
 	if (!after(TCP_SKB_CB(skb)->end_seq, meta_tp->snd_una)) {
 		__kfree_skb(skb);
+		mptcp_debug("do not have to retransmit skb %p, reached already\n", skb);
 		return;
 	}
 
@@ -188,6 +226,7 @@ static void __mptcp_reinject_data(struct sk_buff *orig_skb, struct sock *meta_sk
 	/* If it's empty, just add */
 	if (skb_queue_empty(&mpcb->reinject_queue)) {
 		skb_queue_head(&mpcb->reinject_queue, skb);
+		mptcp_debug("added skb %p as first packet to reinjection_queue %p with new queue size %u intern %u\n", skb, &mpcb->reinject_queue, skb_queue_len(&mpcb->reinject_queue), mpcb->reinject_queue.qlen );
 		return;
 	}
 
@@ -214,6 +253,7 @@ static void __mptcp_reinject_data(struct sk_buff *orig_skb, struct sock *meta_sk
 	if (skb1 && before(seq, TCP_SKB_CB(skb1)->end_seq)) {
 		if (!after(end_seq, TCP_SKB_CB(skb1)->end_seq)) {
 			/* All the bits are present. Don't reinject */
+			mptcp_debug("do not reinject skb %p, overlapping and fully present\n", skb);
 			__kfree_skb(skb);
 			return;
 		}
@@ -224,10 +264,13 @@ static void __mptcp_reinject_data(struct sk_buff *orig_skb, struct sock *meta_sk
 				skb1 = skb_queue_prev(&mpcb->reinject_queue, skb1);
 		}
 	}
-	if (!skb1)
+	if (!skb1) {
 		__skb_queue_head(&mpcb->reinject_queue, skb);
-	else
+		mptcp_debug("added skb %p as queue head for rq %p\n", skb, &mpcb->reinject_queue);
+	} else {
 		__skb_queue_after(&mpcb->reinject_queue, skb1, skb);
+		mptcp_debug("added skb %p after other skb %p in queue with queue size %i for rq %p\n", skb, skb1, skb_queue_len(&mpcb->reinject_queue), &mpcb->reinject_queue);
+	}
 
 	/* And clean segments covered by new one as whole. */
 	while (!skb_queue_is_last(&mpcb->reinject_queue, skb)) {
@@ -265,8 +308,11 @@ void mptcp_reinject_data(struct sock *sk, int clone_it)
 		    (tcb->tcp_flags & TCPHDR_FIN && mptcp_is_data_fin(skb_it) && !skb_it->len))
 			continue;
 
-		if (mptcp_is_reinjected(skb_it))
+		mptcp_debug("check skb %p for reinjection\n", skb_it);
+		if (mptcp_is_reinjected(skb_it)) {
+			mptcp_debug("skb %p was already in reinjection queue, no need for reinjection\n", skb_it);
 			continue;
+		}
 
 		tcb->mptcp_flags |= MPTCP_REINJECT;
 		__mptcp_reinject_data(skb_it, meta_sk, sk, clone_it);
@@ -276,6 +322,7 @@ void mptcp_reinject_data(struct sock *sk, int clone_it)
 	/* If sk has sent the empty data-fin, we have to reinject it too. */
 	if (skb_it && mptcp_is_data_fin(skb_it) && skb_it->len == 0 &&
 	    TCP_SKB_CB(skb_it)->path_mask & mptcp_pi_to_flag(tp->mptcp->path_index)) {
+		//printk("%s reinjects the empty data-fin\n", __func__);
 		__mptcp_reinject_data(skb_it, meta_sk, NULL, 1);
 	}
 
@@ -434,6 +481,8 @@ static bool mptcp_skb_entail(struct sock *sk, struct sk_buff *skb, int reinject)
 						  MPTCPHDR_SEQ64_INDEX : 0);
 
 	subskb = pskb_copy_for_clone(skb, GFP_ATOMIC);
+	mptcp_debug("mptcp_skb_entail copied skb %p to subskb %p, skb->next %p\n", skb, subskb, skb->next);
+
 	if (!subskb)
 		return false;
 
@@ -524,6 +573,16 @@ static int mptcp_fragment(struct sock *meta_sk, struct sk_buff *skb, u32 len,
 		diff = skb->data_len;
 	old_factor = tcp_skb_pcount(skb);
 
+	//mptcp_debug("mptcp_fragment for meta_sk %p with skb %p of length %u with reinject %u\n", meta_sk, skb, len, reinject);
+
+	if(!skb) {
+		printk("mptcp_fragement found skb as null with reinject %i\n", reinject);
+	}
+
+	if(!skb->next) {
+		printk("mptcp_fragement found skb->next for skb %p as null with reinject %i\n", skb, reinject);
+	}
+
 	/* The mss_now in tcp_fragment is used to set the tso_segs of the skb.
 	 * At the MPTCP-level we do not care about the absolute value. All we
 	 * care about is that it is set to 1 for accurate packets_out
@@ -576,6 +635,7 @@ int mptcp_write_wakeup(struct sock *meta_sk)
 		return -1;
 
 	skb = tcp_send_head(meta_sk);
+	mptcp_debug("%s called by %pS for skb %p\n", __func__, __builtin_return_address(0), skb);
 	if (skb &&
 	    before(TCP_SKB_CB(skb)->seq, tcp_wnd_end(meta_tp))) {
 		unsigned int mss;
@@ -646,6 +706,19 @@ window_probe:
 	}
 }
 
+bool is_tp_in_connection_list2(struct mptcp_cb *mpcb, struct tcp_sock* tp) {
+	struct tcp_sock* tmp = mpcb->connection_list;
+
+	while(tmp) {
+		if(tmp == tp) {
+			return true;
+		}
+
+		tmp = tmp->mptcp->next;
+	}
+	return false;
+}
+
 bool mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 		     int push_one, gfp_t gfp)
 {
@@ -657,31 +730,130 @@ bool mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 	unsigned int sublimit;
 	__u32 path_mask = 0;
 
+#define RBS_DEBUG
+
+#ifdef RBS_DEBUG
+	struct sk_buff* skb_last_iteration = NULL;
+	unsigned int iteration_count = 0;
+#endif
+
+	mptcp_debug("rbs before loop meta_sk->send_head = %p and queue_len(sk_write_queue) = %5i\n", tcp_send_head(meta_sk), skb_queue_len(&meta_sk->sk_write_queue));
+
 	while ((skb = mpcb->sched_ops->next_segment(meta_sk, &reinject, &subsk,
 						    &sublimit))) {
 		unsigned int limit;
 
-		subtp = tcp_sk(subsk);
-		mss_now = tcp_current_mss(subsk);
+#ifdef RBS_DEBUG
+		if(iteration_count > 1000 * 1000) { // once found a correct execution with more than 100
+			printk("ProgMP aborts iterations in %s after %u rounds\n", __func__, iteration_count);
+			BUG();
+		}
 
-		if (reinject == 1) {
-			if (!after(TCP_SKB_CB(skb)->end_seq, meta_tp->snd_una)) {
-				/* Segment already reached the peer, take the next one */
-				__skb_unlink(skb, &mpcb->reinject_queue);
-				__kfree_skb(skb);
+		if(skb_last_iteration == skb) {
+			iteration_count++;
+		} else {
+			skb_last_iteration = skb;
+			iteration_count = 0;
+		}
+#endif
+		/* this fix is important, but should happen somewhere else... we do not want to overcount packets_out in
+		 * tcp_event_new_data_sent, which is only called if reinject == 0...
+		 */
+		if(reinject==0 && TCP_SKB_CB(skb)->path_mask) {
+			reinject = -1;
+		}
+
+//		mptcp_debug("rbs in loop meta_sk->send_head = %p and queue_len(sk_write_queue) = %5i with skb %p and path_mask %u\n", 
+//			tcp_send_head(meta_sk), skb_queue_len(&meta_sk->sk_write_queue), skb, TCP_SKB_CB(skb)->path_mask);
+
+		subtp = tcp_sk(subsk);
+
+		/*
+		 * rbs might return invalid subsk from its open actions
+		 *
+		 * before we use the subsk, ensure that it is still valid
+		 * this test leads to an undefined symbol if executed in the scheduler,
+		 * but would make more sense at this place
+		 */
+		if(mpcb->sched_ops->name[0] == 'r' && mpcb->sched_ops->name[1] == 'b' && mpcb->sched_ops->name[2] == 's') {
+			if(!is_tp_in_connection_list2(mpcb, (struct tcp_sock*) subsk)) {
+//				mptcp_debug("rbs recovers skb %p from outdated subflow %p\n", skb, subsk);
+				/*
+				 * Actually, this might be a semantic problematic, as packets in the open action might overtake this packet
+				 *
+				 * We have to clone the skb for the reinjection queue, as it will remain in the sending_queue
+				 */
+				__mptcp_reinject_data(skb, meta_sk, NULL, 1);
+//				mptcp_debug("added packet %p as first packet to reinject queue with new queue size %i, skb->prev = %p, skb->next = %p\n", skb, skb_queue_len(&mpcb->reinject_queue), skb->prev, skb->next );
+
 				continue;
 			}
 		}
+
+		mss_now = tcp_current_mss(subsk);
+
+		if (reinject == 1) {
+			if(mpcb->sched_ops->name[0] == 'r' && mpcb->sched_ops->name[1] == 'b' && mpcb->sched_ops->name[2] == 's') {
+				/*
+				 * rbs manages the queue by itself, but for debugging purposes, we might want to check again
+				 */
+#ifdef RBS_DEBUG
+				if (!after(TCP_SKB_CB(skb)->end_seq, meta_tp->snd_una)) {
+					printk("ProgMP: found a reinjected skb %p with end_seq %u < snd_una %u in %s ... it was already acknowledged\n", skb, TCP_SKB_CB(skb)->end_seq, meta_tp->snd_una, __func__);
+					BUG();
+				}
+#endif
+			} else {
+				if (!after(TCP_SKB_CB(skb)->end_seq, meta_tp->snd_una)) {
+					/* Segment already reached the peer, take the next one */
+					__skb_unlink(skb, &mpcb->reinject_queue);
+					__kfree_skb(skb);
+					continue;
+				}
+			}
+		}
+
+		/*
+		 * RBS copied from sched, without this coding, the fragmentation call later sometimes crashes
+		 */
+		if(mpcb->sched_ops->name[0] == 'r' && mpcb->sched_ops->name[1] == 'b' && mpcb->sched_ops->name[2] == 's') {
+			u32 max_segs;
+			u16 gso_max_segs = subsk->sk_gso_max_segs;
+			if (!gso_max_segs) /* No gso supported on the subflow's NIC */
+				gso_max_segs = 1;
+			max_segs = min_t(unsigned int, tcp_cwnd_test(subtp, skb), gso_max_segs);
+			if (!max_segs) {
+//				mptcp_debug("RBS0 recover ... could not send skb %p\n", skb);
+				//if(mpcb->sched_ops->recover_skb) {
+				//	mpcb->sched_ops->recover_skb(meta_sk, subsk, skb, reinject);
+				//}
+				//break;
+//				mptcp_debug("%s temporarly removed this to check what happens when we send more than cwnd\n", __func__);
+			}
+		}
+		/*
+		 * RBS copied from sched end
+		 */
 
 		/* If the segment was cloned (e.g. a meta retransmission),
 		 * the header must be expanded/copied so that there is no
 		 * corruption of TSO information.
 		 */
-		if (skb_unclone(skb, GFP_ATOMIC))
+		if (skb_unclone(skb, GFP_ATOMIC)) {
+//			mptcp_debug("RBS1 recover ... could not send skb %p\n", skb);
+			if(mpcb->sched_ops->recover_skb) {
+				mpcb->sched_ops->recover_skb(meta_sk, subsk, skb, reinject);
+			}
 			break;
+		}
 
-		if (unlikely(!tcp_snd_wnd_test(meta_tp, skb, mss_now)))
+		if (unlikely(!tcp_snd_wnd_test(meta_tp, skb, mss_now))) {
+//			mptcp_debug("RBS2 could not send skb %p\n", skb);
+			if(mpcb->sched_ops->recover_skb) {
+				mpcb->sched_ops->recover_skb(meta_sk, subsk, skb, reinject);
+			}
 			break;
+		}
 
 		/* Force tso_segs to 1 by using UINT_MAX.
 		 * We actually don't care about the exact number of segments
@@ -701,8 +873,13 @@ bool mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 		 */
 		if (unlikely(!tcp_nagle_test(meta_tp, skb, mss_now,
 					     (tcp_skb_is_last(meta_sk, skb) ?
-					      nonagle : TCP_NAGLE_PUSH))))
+					      nonagle : TCP_NAGLE_PUSH)))) {
+//			mptcp_debug("RBS3 could not send skb %p\n", skb);
+			if(mpcb->sched_ops->recover_skb) {
+				mpcb->sched_ops->recover_skb(meta_sk, subsk, skb, reinject);
+			}
 			break;
+		}
 
 		limit = mss_now;
 		/* skb->len > mss_now is the equivalent of tso_segs > 1 in
@@ -725,13 +902,40 @@ bool mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 
 		if (sublimit)
 			limit = min(limit, sublimit);
+#ifdef FRAGMENT_BUG_DBG
+		if(!skb) {
+//			printk("mptcp_next_segment found before fragement skb as null with reinject %i\n", reinject);
+		}
+
+		if(!skb->next) {
+//			printk("mptcp_next_segment found before fragment skb->next for skb %p as null with reinject %i\n", skb, reinject);
+		}
+#endif
 
 		if (skb->len > limit &&
-		    unlikely(mptcp_fragment(meta_sk, skb, limit, gfp, reinject)))
+		    unlikely(mptcp_fragment(meta_sk, skb, limit, gfp, reinject))) {
+//			mptcp_debug("RBS4 could not send skb %p\n", skb);
+			if(mpcb->sched_ops->recover_skb) {
+				mpcb->sched_ops->recover_skb(meta_sk, subsk, skb, reinject);
+			}
 			break;
+		}
 
-		if (!mptcp_skb_entail(subsk, skb, reinject))
+		if (!mptcp_skb_entail(subsk, skb, reinject)) {
+//			mptcp_debug("RBS5 could not send skb %p\n", skb);
+			if(mpcb->sched_ops->recover_skb) {
+				mpcb->sched_ops->recover_skb(meta_sk, subsk, skb, reinject);
+			}
 			break;
+		}
+
+		if(mpcb->sched_ops->update_stats) {
+			mpcb->sched_ops->update_stats(subsk, skb, skb->len, 0);
+		}
+
+		/* Statisitics for the web */
+		subtp->mptcp->bytes_snd += skb->len;
+
 		/* Nagle is handled at the MPTCP-layer, so
 		 * always push on the subflow
 		 */
@@ -749,13 +953,28 @@ bool mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 		tcp_minshall_update(meta_tp, mss_now, skb);
 
 		if (reinject > 0) {
-			__skb_unlink(skb, &mpcb->reinject_queue);
-			kfree_skb(skb);
+			if(mpcb->sched_ops->name[0] == 'r' && mpcb->sched_ops->name[1] == 'b' && mpcb->sched_ops->name[2] == 's') {
+				/*
+				 * rbs decides about unlinking, and always returns a copy of the skb if called with top,
+				 * thus, calling free is safe at this position
+				 */
+
+				// TODO a unlinked packet might cause problems in fragement, as fragement assumes the packet to be in a queue!
+				//kfree_skb(skb);
+//				mptcp_debug("%s pushed reinjected %p with next %p and qlen %u\n",
+//						__func__, skb, skb->next, mpcb->reinject_queue.qlen);
+			} else {
+				__skb_unlink(skb, &mpcb->reinject_queue);
+				kfree_skb(skb);
+			}
 		}
 
 		if (push_one)
 			break;
 	}
+
+//	mptcp_debug("rbs after loop meta_sk->send_head = %p and queue_len(sk_write_queue) = %5i and packets_out %u\n",
+//		tcp_send_head(meta_sk), skb_queue_len(&meta_sk->sk_write_queue), meta_tp->packets_out);
 
 	mptcp_for_each_sk(mpcb, subsk) {
 		subtp = tcp_sk(subsk);
@@ -1217,9 +1436,19 @@ void mptcp_send_fin(struct sock *meta_sk)
 	mss_now = mptcp_current_mss(meta_sk);
 
 	if (tcp_send_head(meta_sk) != NULL) {
-		TCP_SKB_CB(skb)->mptcp_flags |= MPTCPHDR_FIN;
-		TCP_SKB_CB(skb)->end_seq++;
-		meta_tp->write_seq++;
+		if(skb == NULL) {
+			printk("ProgMP would have crashed in %s as send_head is not in write queue. how can this happen?\n", __func__);
+		} else {
+			/* afr: ist das wirklich ein fix?  
+			 *      ohne das hier gibt es manchmal 
+			 * 	am Ende einen absturz, weil
+			 * 	der send_head auf etwas zeigt,
+			 * 	aber die queue ler ist.
+			 */
+			TCP_SKB_CB(skb)->mptcp_flags |= MPTCPHDR_FIN;
+			TCP_SKB_CB(skb)->end_seq++;
+			meta_tp->write_seq++;
+		}
 	} else {
 		/* Socket is locked, keep trying until memory is available. */
 		for (;;) {
@@ -1385,6 +1614,8 @@ int mptcp_retransmit_skb(struct sock *meta_sk, struct sk_buff *skb)
 	unsigned int limit, mss_now;
 	int err = -1;
 
+	mptcp_debug("retransmit skb %p for meta_sk %p with skb->next = %p and skb->prev = %p\n", skb, meta_sk, skb->next, skb->prev);
+
 	/* Do not sent more than we queued. 1/4 is reserved for possible
 	 * copying overhead: fragmentation, tunneling, mangling etc.
 	 *
@@ -1466,7 +1697,19 @@ void mptcp_meta_retransmit_timer(struct sock *meta_sk)
 	struct tcp_sock *meta_tp = tcp_sk(meta_sk);
 	struct mptcp_cb *mpcb = meta_tp->mpcb;
 	struct inet_connection_sock *meta_icsk = inet_csk(meta_sk);
-	int err;
+	int err = 0;
+
+/*	mptcp_debug("#########  afr meta_retransmit timer meta_sk->send_head %p , meta_sk->sk_write_queue-next %p, reinject_queue len %i, first packet in reinject queue %p called by %pS\n",
+			meta_sk->sk_send_head,
+			meta_sk->sk_write_queue.next,
+			skb_queue_len(&meta_tp->mpcb->reinject_queue),
+			skb_peek(&meta_tp->mpcb->reinject_queue),
+			__builtin_return_address(0));*/
+
+	if(tcp_write_queue_empty(meta_sk)) {
+		printk("ProgMP: abort meta retransmit as write queue is empty... why is this triggered at all?");
+		return;
+	}
 
 	/* In fallback, retransmission is handled at the subflow-level */
 	if (!meta_tp->packets_out || mpcb->infinite_mapping_snd)
@@ -1503,7 +1746,17 @@ void mptcp_meta_retransmit_timer(struct sock *meta_sk)
 			return;
 		}
 
-		mptcp_retransmit_skb(meta_sk, tcp_write_queue_head(meta_sk));
+		mptcp_debug("meta_retransmit_timer wants to retransmit skb %p", tcp_write_queue_head(meta_sk));
+		/* rbs: check if we already sent this skb (not the data, the skb) */
+		if(!tcp_skb_pcount(tcp_write_queue_head(meta_sk))) {
+			// put it in reinjection queue would be "correct", however, than we would be out of order...
+			// maybe we will directly xmit it here...
+			// maybe we will remove it from sending queue, and continue without cloning...
+			mptcp_debug("rbs detected sk_send_head before unsent packets for retransmission of skb %p, put copy into reinjection queue\n", tcp_write_queue_head(meta_sk));
+			__mptcp_reinject_data(tcp_write_queue_head(meta_sk), meta_sk, NULL, 1);
+		} else {
+			mptcp_retransmit_skb(meta_sk, tcp_write_queue_head(meta_sk));
+		}
 		goto out_reset_timer;
 	}
 
@@ -1515,7 +1768,21 @@ void mptcp_meta_retransmit_timer(struct sock *meta_sk)
 
 	meta_icsk->icsk_ca_state = TCP_CA_Loss;
 
-	err = mptcp_retransmit_skb(meta_sk, tcp_write_queue_head(meta_sk));
+	mptcp_debug("meta_retransmit_timer at second position wants to retransmit skb %p", tcp_write_queue_head(meta_sk));
+	// TODO this code is just a copy of the stuff some lines above
+	/* rbs: check if we already sent this skb (not the data, the skb) */
+	if(!tcp_skb_pcount(tcp_write_queue_head(meta_sk))) {
+		// put it in reinjection queue would be "correct", however, than we would be out of order...
+		// maybe we will directly xmit it here...
+		// maybe we will remove it from sending queue, and continue without cloning...
+		mptcp_debug("rbs detected sk_send_head before unsent packets for retransmission of skb %p at second position, put copy into reinjection queue\n", tcp_write_queue_head(meta_sk));
+		// TODO jetzt beim zweiten draufschauen ist mir nicht mehr klar, warum wir das drin haben... wie kann write queue head ... naja
+		if(tcp_write_queue_head(meta_sk))
+			__mptcp_reinject_data(tcp_write_queue_head(meta_sk), meta_sk, NULL, 1);
+	} else {
+		err = mptcp_retransmit_skb(meta_sk, tcp_write_queue_head(meta_sk));
+	}
+
 	if (err > 0) {
 		/* Retransmission failed because of local congestion,
 		 * do not backoff.
@@ -1577,6 +1844,12 @@ out_reset_timer:
 void mptcp_sub_retransmit_timer(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
+
+	/*printk("Sub retransmit Caller is %pS\n", __builtin_return_address(0));
+	printk("Callerer is %pS\n", __builtin_return_address(1));
+	mptcp_debug("#########  sub_restransmit_timer meta_sk->send_head %p , reinject_queue len %i and queue %p and first entry %p called by %pS\n", 
+		sk->sk_send_head, skb_queue_len(&tp->mpcb->reinject_queue), &tp->mpcb->reinject_queue, 
+		tp->mpcb->reinject_queue.next, __builtin_return_address(0));*/
 
 	tcp_retransmit_timer(sk);
 

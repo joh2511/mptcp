@@ -283,6 +283,9 @@
 #include <asm/unaligned.h>
 #include <net/busy_poll.h>
 
+#include "../mptcp/mptcp_rbs_sched.h"
+#include "../mptcp/mptcp_rbs_scheduler.h"
+
 int sysctl_tcp_fin_timeout __read_mostly = TCP_FIN_TIMEOUT;
 
 int sysctl_tcp_min_tso_segs __read_mostly = 2;
@@ -653,6 +656,37 @@ static void skb_entail(struct sock *sk, struct sk_buff *skb)
 	sk_mem_charge(sk, skb->truesize);
 	if (tp->nonagle & TCP_NAGLE_PUSH)
 		tp->nonagle &= ~TCP_NAGLE_PUSH;
+
+	/* RBS specific stuff */
+	if (mptcp(tp)) {
+		/* note: only the meta_sk should be used for this*/
+		if (tp->mpcb->meta_sk == (struct sock *) tp) {
+			struct tcp_sock *meta_tp = tcp_sk(sk);
+
+			/* are we using rbs? */
+			if (mptcp_rbs_is_sched_used(meta_tp)) {
+				struct mptcp_rbs_cb *rbs_cb =
+				    mptcp_rbs_get_cb(meta_tp);
+
+				if (rbs_cb->queue_position == NULL) {
+					rbs_cb->queue_position = skb;
+					mptcp_debug("rbs corrects queue "
+						    "position, before NULL, "
+						    "now %p\n",
+						    skb);
+				} else {
+					mptcp_debug(
+					    "rbs no need to correct queue "
+					    "position, remains with %p, not "
+					    "switched to %p\n",
+					    rbs_cb->queue_position, skb);
+				}
+			}
+		} else {
+			printk("avoided bug at the airport 2\n");
+		}
+	}
+	/* RBS specific stuff END */
 }
 
 static inline void tcp_mark_urg(struct tcp_sock *tp, int flags)
@@ -1232,6 +1266,33 @@ new_segment:
 				skb->ip_summed = CHECKSUM_PARTIAL;
 
 			skb_entail(sk, skb);
+
+			/* RBS specific stuff to set skb props*/
+			if (mptcp(tp)) {
+				/* note: only the meta_sk should be used for
+				 * this*/
+				if (tp->mpcb->meta_sk == (struct sock *) tp) {
+					struct tcp_sock *meta_tp = tcp_sk(sk);
+
+					/* are we using rbs? */
+					if (mptcp_rbs_is_sched_used(meta_tp)) {
+						struct mptcp_rbs_cb *rbs_cb =
+						    mptcp_rbs_get_cb(meta_tp);
+
+						mptcp_debug(
+						    "setting skb->mptcp_rbs "
+						    "with %i for %p with size "
+						    "of tcp_skb_cb %lu\n",
+						    TCP_SKB_CB(skb)->mptcp_rbs.user,
+						    skb,
+						    sizeof(struct tcp_skb_cb));
+						TCP_SKB_CB(skb)->mptcp_rbs.user =
+						    rbs_cb->skb_prop;
+					}
+				}
+			}
+			/* RBS specific stuff END */
+
 			copy = size_goal;
 			max = size_goal;
 
@@ -2408,6 +2469,56 @@ static int do_tcp_setsockopt(struct sock *sk, int level,
 		release_sock(sk);
 		return err;
 	}
+#ifdef CONFIG_MPTCP
+	case MPTCP_SCHEDULER: {
+		lock_sock(sk);
+
+		if (mptcp_init_failed || !sysctl_mptcp_enabled ||
+		    !mptcp_rbs_is_sched_used(tp)) {
+			err = -EPERM;
+		} else if (optlen == 0) {
+			if (!mptcp_rbs_scheduler_set(sk, NULL))
+				err = -EINVAL;
+		} else if (optlen >= 256) {
+			err = -EINVAL;
+		} else {
+			char data[256];
+			memset(data, 0, sizeof(data));
+
+			val = strncpy_from_user(data, optval, optlen);
+			if (val < 0)
+				err = -EFAULT;
+			else if (!mptcp_rbs_scheduler_set(sk, data))
+				err = -EINVAL;
+		}
+
+		release_sock(sk);
+		return err;
+	}
+	case MPTCP_SCHEDULER_REG: {
+		lock_sock(sk);
+		if (mptcp_init_failed || !sysctl_mptcp_enabled ||
+		    !mptcp_rbs_is_sched_used(tp)) {
+			err = -EPERM;
+		} else if (optlen != sizeof(struct mptcp_rbs_reg_value)) {
+			err = -EINVAL;
+		} else {
+			struct mptcp_rbs_reg_value reg_value;
+
+			val =
+			    copy_from_user(&reg_value, optval,
+					   sizeof(struct mptcp_rbs_reg_value));
+			if (val < 0)
+				err = -EFAULT;
+			else if (!mptcp_rbs_reg_value_set(tp,
+							  &reg_value))
+				err = -EINVAL;
+		}
+
+		release_sock(sk);
+		return err;
+	}
+#endif
 	default:
 		/* fallthru */
 		break;
@@ -2449,7 +2560,20 @@ static int do_tcp_setsockopt(struct sock *sk, int level,
 			tp->nonagle &= ~TCP_NAGLE_OFF;
 		}
 		break;
-
+#ifdef CONFIG_MPTCP
+	case MPTCP_RBS_SKB_PROP: {
+		if (mptcp_init_failed || !sysctl_mptcp_enabled ||
+		    !mptcp_rbs_is_sched_used(tp)) {
+			err = -EPERM;
+		} else if (val < 0) {
+			err = -EFAULT;
+		} else if (val >= 0 && val <= 0x20) { // we only have 5 bit
+			mptcp_rbs_get_cb(tp)->skb_prop = val;
+		} else
+			err = -EINVAL;
+		break;
+	}
+#endif
 	case TCP_THIN_LINEAR_TIMEOUTS:
 		if (val < 0 || val > 1)
 			err = -EINVAL;
@@ -2940,6 +3064,25 @@ static int do_tcp_getsockopt(struct sock *sk, int level,
 	case MPTCP_ENABLED:
 		val = sock_flag(sk, SOCK_MPTCP) ? 1 : 0;
 		break;
+	case MPTCP_SCHEDULER: {
+		const char *str = "";
+		struct tcp_sock *tp = tcp_sk(sk);
+
+		if (get_user(len, optlen))
+			return -EFAULT;
+
+		if (!mptcp_init_failed && sysctl_mptcp_enabled &&
+		    mptcp_rbs_is_sched_used(tp))
+			str = mptcp_rbs_scheduler_get(sk)->name;
+
+		len = min_t(unsigned int, len, strlen(str));
+
+		if (put_user(len, optlen))
+			return -EFAULT;
+		if (copy_to_user(optval, str, len))
+			return -EFAULT;
+		return 0;
+	}
 #endif
 	default:
 		return -ENOPROTOOPT;
