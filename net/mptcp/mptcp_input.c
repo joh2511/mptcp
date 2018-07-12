@@ -1102,7 +1102,7 @@ void afr_ofo_push(struct sock *sk) {
 		return;
 	}
 
-	if(tp->out_of_order_queue.qlen > 0) {
+	if(!RB_EMPTY_ROOT(&tp->out_of_order_queue)) {
 #ifdef AFR_OOO_RECEIVE_VERBOSE
 		printk("%s afr_ooo checking sbf %p out_of_order_queue.qlen %u\n", __func__, sk, tp->out_of_order_queue.qlen);
 #endif
@@ -1117,7 +1117,7 @@ void afr_ofo_push(struct sock *sk) {
 			u32 last_data_seq = 0;
 			bool matched = false;
 
-		skb_queue_walk_safe(&tp->out_of_order_queue, skb, tmp)
+		rbtree_postorder_for_each_entry_safe(skb, tmp, &tp->out_of_order_queue, rbnode)
 		{
 			u32 *ptr;
 			u32 data_seq, sub_seq, data_len;
@@ -1209,8 +1209,8 @@ void afr_ofo_push(struct sock *sk) {
 				TCP_SKB_CB(skb_cpy)->seq = data_seq;
 				TCP_SKB_CB(skb_cpy)->end_seq = data_end_seq;
 
-//				printk("%s matched ooo packet for meta_sk %p on sbf %p with sbf seq %u end_seq %u and meta seq %u end_seq %u with sbf.rq.count %u and tp->rcv_nxt %u\n", 
-//					__func__, meta_sk, sk, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq, data_seq, data_end_seq, tp->out_of_order_queue.qlen, tp->rcv_nxt);
+				//printk("%s matched ooo packet for meta_sk %p on sbf %p with sbf seq %u end_seq %u and meta seq %u end_seq %u with sbf.rq.count %u and tp->rcv_nxt %u\n", 
+				//	__func__, meta_sk, sk, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq, data_seq, data_end_seq, tp->out_of_order_queue.qlen, tp->rcv_nxt);
 				mptcp_ooo_number_matches++;
 
 				/* Is direct copy possible ? */
@@ -1219,9 +1219,9 @@ void afr_ofo_push(struct sock *sk) {
 					meta_tp->copied_seq == meta_tp->rcv_nxt &&
 					meta_tp->ucopy.len && sock_owned_by_user(meta_sk)) {
 
-//					printk("%s uses direct copy for skb_cpy %p\n", __func__, skb_cpy);
+					//printk("%s uses direct copy for skb_cpy %p\n", __func__, skb_cpy);
 					eaten = mptcp_direct_copy(skb_cpy, meta_sk);
-//					printk("%s direct copy returned %u\n", __func__, eaten);
+					//printk("%s direct copy returned %u\n", __func__, eaten);
 				}
 
 				if (meta_tp->mpcb->in_time_wait) { /* In time-wait, do not receive data */
@@ -1241,8 +1241,8 @@ void afr_ofo_push(struct sock *sk) {
 				//mptcp_check_rcvseq_wrap(meta_tp, old_rcv_nxt);
 
 				/* Check if this fills a gap in the ofo queue */
-				if (!skb_queue_empty(&meta_tp->out_of_order_queue))
-					mptcp_ofo_queue(meta_sk);
+				if (!RB_EMPTY_ROOT(&meta_tp->out_of_order_queue))
+					tcp_ofo_queue(meta_sk);
 				/* Whenever we check the ofo_queue, we check all sbf ofos */
 				mptcp_afr_all_ofo_queue(meta_sk, sk);
 			}
@@ -1271,7 +1271,7 @@ void mptcp_afr_all_ofo_queue(struct sock *meta_sk, struct sock *not_sk) {
 	mptcp_for_each_sk(mpcb, sk) {
 		if(sk == not_sk)
 			continue;
-		if(tcp_sk(sk)->out_of_order_queue.qlen > 0) {
+		if(!RB_EMPTY_ROOT(&tcp_sk(sk)->out_of_order_queue)) {
 			afr_ofo_push(sk);
 		}
 	}

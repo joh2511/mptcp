@@ -679,7 +679,7 @@ static const struct bpf_func_proto *get_func_proto(enum bpf_func_id func_id)
 	return &func_protos[index];
 }
 
-static bool is_valid_access(int off, int size, enum bpf_access_type type)
+static bool is_valid_access(int off, int size, enum bpf_access_type type, enum bpf_reg_type *reg_type)
 {
 	return false;
 }
@@ -4131,6 +4131,7 @@ void mptcp_rbs_opt_ebpf(struct mptcp_rbs_opt_ctx *ctx)
 	struct bpf_prog *prog;
 	struct mptcp_rbs_cfg_block *block;
 	struct mptcp_rbs_ebpf_block *first_eblock;
+	int err;
 
 	/* Generate code */
 	memset(&ectx, 0, sizeof(struct ebpf_ctx));
@@ -4151,7 +4152,7 @@ void mptcp_rbs_opt_ebpf(struct mptcp_rbs_opt_ctx *ctx)
 	mptcp_rbs_ebpf_blocks_free(first_eblock);
 
 	/* JIT the result */
-	bpf_prog_select_runtime(prog);
+	bpf_prog_select_runtime(prog, &err);
 
 	/* Create eBPF statement and replace whole CFG with it */
 	mptcp_rbs_cfg_blocks_free(ctx->variation->first_block);

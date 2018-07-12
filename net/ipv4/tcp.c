@@ -2616,15 +2616,16 @@ static int do_tcp_setsockopt(struct sock *sk, int level,
 		} else {
 			struct mptcp_rbs_reg_value reg_value;
 
-			val =
-			    copy_from_user(&reg_value, optval,
+			val = copy_from_user(&reg_value, optval,
 					   sizeof(struct mptcp_rbs_reg_value));
 			if (val < 0)
 				err = -EFAULT;
-			else if (!mptcp_rbs_reg_value_set(tp,
-							  &reg_value))
+			else if (!mptcp_rbs_reg_value_set(tp, &reg_value))
 				err = -EINVAL;
 		}
+		release_sock(sk);
+		return err;
+	}
 
 	case MPTCP_PATH_MANAGER: {
 		char name[MPTCP_PM_NAME_MAX];

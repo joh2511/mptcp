@@ -441,7 +441,7 @@ struct sk_buff *mptcp_rbs_next_segment(struct sock *meta_sk, int *reinject,
 
 #ifdef CONFIG_MPTCP_RBSMEASURE
 	/* first time measurment */
-	begin_time = __native_read_tsc();
+	begin_time = rdtsc();
 #endif
 
 	/*
@@ -452,7 +452,7 @@ struct sk_buff *mptcp_rbs_next_segment(struct sock *meta_sk, int *reinject,
 	if (skb) {
 #ifdef CONFIG_MPTCP_RBSMEASURE
 		rbs_cb->scheduler->total_time_oa_skb +=
-		    __native_read_tsc() - begin_time;
+		    rdtsc() - begin_time;
 		rbs_cb->scheduler->total_count_oa_skb++;
 #endif
 
@@ -549,7 +549,7 @@ struct sk_buff *mptcp_rbs_next_segment(struct sock *meta_sk, int *reinject,
 		++rbs_cb->exec_count;
 
 #ifdef CONFIG_MPTCP_RBSMEASURE
-		begin_time2 = __native_read_tsc();
+		begin_time2 = rdtsc();
 #endif
 
 		/* Execute the rules and apply new actions if there are any */
@@ -560,11 +560,11 @@ struct sk_buff *mptcp_rbs_next_segment(struct sock *meta_sk, int *reinject,
 		if (skb) {
 			rbs_cb->scheduler->total_exec_count_skb++;
 			rbs_cb->scheduler->total_exec_time_skb +=
-			    __native_read_tsc() - begin_time2;
+			    rdtsc() - begin_time2;
 		} else {
 			rbs_cb->scheduler->total_exec_count_no_skb++;
 			rbs_cb->scheduler->total_exec_time_no_skb +=
-			    __native_read_tsc() - begin_time2;
+			    rdtsc() - begin_time2;
 		}
 #endif
 
@@ -579,11 +579,11 @@ struct sk_buff *mptcp_rbs_next_segment(struct sock *meta_sk, int *reinject,
 #ifdef CONFIG_MPTCP_RBSMEASURE
 	if (skb) {
 		rbs_cb->scheduler->total_time_noa_skb +=
-		    __native_read_tsc() - begin_time;
+		    rdtsc() - begin_time;
 		rbs_cb->scheduler->total_count_noa_skb++;
 	} else {
 		rbs_cb->scheduler->total_time_noa_no_skb +=
-		    __native_read_tsc() - begin_time;
+		    rdtsc() - begin_time;
 		rbs_cb->scheduler->total_count_noa_no_skb++;
 	}
 #endif

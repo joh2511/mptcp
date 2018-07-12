@@ -11,7 +11,7 @@ void mptcp_rbs_exec(struct mptcp_rbs_eval_ctx *ctx)
 	int i;
 
 #ifdef CONFIG_MPTCP_RBSMEASURE
-	u64 time = __native_read_tsc();
+	u64 time = rdtsc();
 #endif
 
 	while (block) {
@@ -40,7 +40,7 @@ void mptcp_rbs_exec(struct mptcp_rbs_eval_ctx *ctx)
 
 #ifdef CONFIG_MPTCP_RBSMEASURE
 	variation->exec_count += 1;
-	variation->total_time += __native_read_tsc() - time;
+	variation->total_time += rdtsc() - time;
 #endif
 
 	/* Release allocated variables */

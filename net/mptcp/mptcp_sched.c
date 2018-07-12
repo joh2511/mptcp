@@ -398,7 +398,7 @@ static struct sk_buff *mptcp_next_segment(struct sock *meta_sk,
 					  struct sock **subsk,
 					  unsigned int *limit)
 {
-	u64 begin_time = __native_read_tsc();
+	u64 begin_time = rdtsc();
 	struct sk_buff *skb = __mptcp_next_segment(meta_sk, reinject);
 	unsigned int mss_now;
 	struct tcp_sock *subtp;
@@ -409,26 +409,27 @@ static struct sk_buff *mptcp_next_segment(struct sock *meta_sk,
 	*limit = 0;
 
 	if (!skb) {
-		total_default_time_no_skb += __native_read_tsc() - begin_time;
+		total_default_time_no_skb += rdtsc() - begin_time;
 		total_default_count_no_skb++;
 		return NULL;
 	}
 
 	*subsk = get_available_subflow(meta_sk, skb, false);
 	if (!*subsk) {
-		total_default_time_no_skb += __native_read_tsc() - begin_time;
+		total_default_time_no_skb += rdtsc() - begin_time;
 		total_default_count_no_skb++;
 		return NULL;
+	}
 
 	subtp = tcp_sk(*subsk);
 	mss_now = tcp_current_mss(*subsk);
 
 	if (!*reinject && unlikely(!tcp_snd_wnd_test(tcp_sk(meta_sk), skb, mss_now))) {
 		skb = mptcp_rcv_buf_optimization(*subsk, 1);
-		if (skb)
+		if (skb) {
 			*reinject = -1;
-		else {
-			total_default_time_no_skb += __native_read_tsc() - begin_time;
+		} else {
+			total_default_time_no_skb += rdtsc() - begin_time;
 			total_default_count_no_skb++;
 
 			return NULL;
@@ -437,7 +438,7 @@ static struct sk_buff *mptcp_next_segment(struct sock *meta_sk,
 
 	/* No splitting required, as we will only send one single segment */
 	if (skb->len <= mss_now) {
-		total_default_time_skb += __native_read_tsc() - begin_time;
+		total_default_time_skb += rdtsc() - begin_time;
 		total_default_count_skb++;
 
 		return skb;
@@ -456,7 +457,7 @@ static struct sk_buff *mptcp_next_segment(struct sock *meta_sk,
 		gso_max_segs = 1;
 	max_segs = min_t(unsigned int, tcp_cwnd_test(subtp, skb), gso_max_segs);
 	if (!max_segs) {
-		total_default_time_no_skb += __native_read_tsc() - begin_time;
+		total_default_time_no_skb += rdtsc() - begin_time;
 		total_default_count_no_skb++;
 
 		return NULL;
@@ -473,7 +474,7 @@ static struct sk_buff *mptcp_next_segment(struct sock *meta_sk,
 		/* Or, take the window */
 		*limit = needed;
 
-	total_default_time_skb += __native_read_tsc() - begin_time;
+	total_default_time_skb += rdtsc() - begin_time;
 	total_default_count_skb++;
 
 	return skb;
@@ -494,7 +495,7 @@ struct mptcp_sched_ops mptcp_sched_default = {
 	.owner = THIS_MODULE,
 };
 
-struct mptcp_sched_ops *mptcp_sched_find(const char *name)
+static struct mptcp_sched_ops *mptcp_sched_find(const char *name)
 {
 	struct mptcp_sched_ops *e;
 
@@ -604,7 +605,8 @@ int mptcp_set_default_scheduler_for_tuple(const char *name, __be32 dstip,
 #endif
 	mptcp_debug("afr: found scheduler %p for %s after module\n", sched, name);
 	if (sched) {
-		struct mptcp_sched_select *sched_select = kzalloc(sizeof(struct mptcp_sched_select), GFP_ATOMIC);
+		struct mptcp_sched_select *sched_select =
+			kzalloc(sizeof(struct mptcp_sched_select), GFP_ATOMIC);
 		sched_select->dstip = dstip;
 		sched_select->sport = sport;
 		sched_select->till_time_s = till_time_s;
@@ -630,23 +632,25 @@ struct mptcp_sched_ops *mptcp_sched_find_for_tuple(__be32 dstip, __be16 sport_en
 
 	getnstimeofday(&ts);
 
-	mptcp_debug("afr: searching for ip %i.%i.%i.%i and port %i in list at jiffy %llu\n", dstip & 0x000000FF,
-													(dstip & 0x0000FF00)>>8,
-													(dstip & 0x00FF0000)>>16,
-													(dstip & 0xFF000000)>>24,
-													sport, ts.tv_sec);
+	mptcp_debug("afr: searching for ip %i.%i.%i.%i"
+				"and port %i in list at  jiffy %llu\n", 
+				(dstip & 0x000000FF)    ,
+				(dstip & 0x0000FF00)>> 8,
+				(dstip & 0x00FF0000)>>16,
+				(dstip & 0xFF000000)>>24,
+				sport, ts.tv_sec);
 	list_for_each_entry_safe(e, n, &mptcp_sched_select_list, list) {
-		mptcp_debug("afr: comparing with ip %i.%i.%i.%i and port %i in list with sched %p\n", e->dstip & 0x000000FF,
-																	(e->dstip & 0x0000FF00)>>8,
-																	(e->dstip & 0x00FF0000)>>16,
-																	(e->dstip & 0xFF000000)>>24,
-																	e->sport, e->sched_ops);
+		mptcp_debug("afr: comparing with ip %i.%i.%i.%i"
+		            "and port %i in list with sched %p\n",
+					(e->dstip & 0x000000FF)    ,
+					(e->dstip & 0x0000FF00)>> 8,
+					(e->dstip & 0x00FF0000)>>16,
+					(e->dstip & 0xFF000000)>>24,
+					e->sport, e->sched_ops);
 		if (e->till_time_s < ts.tv_sec) {
 			mptcp_debug("afr: removing selection scheduler\n");
-			list_del(e);
+			list_del(&e->list);
 		}
-
-
 
 		if (e->dstip == dstip && e->sport == sport)
 			return e->sched_ops;
@@ -657,7 +661,7 @@ struct mptcp_sched_ops *mptcp_sched_find_for_tuple(__be32 dstip, __be16 sport_en
 
 
 /* Must be called with rcu lock held */
-static struct mptcp_sched_ops *__mptcp_sched_find_autoload(const char *name)
+struct mptcp_sched_ops *__mptcp_sched_find_autoload(const char *name)
 {
 	struct mptcp_sched_ops *sched = mptcp_sched_find(name);
 #ifdef CONFIG_MODULES
