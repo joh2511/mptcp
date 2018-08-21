@@ -121,6 +121,7 @@ enum bpf_prog_type {
 	BPF_PROG_TYPE_KPROBE,
 	BPF_PROG_TYPE_SCHED_CLS,
 	BPF_PROG_TYPE_SCHED_ACT,
+	BPF_PROG_TYPE_RBS,
 };
 
 #define BPF_PSEUDO_MAP_FD	1
@@ -210,6 +211,25 @@ enum bpf_func_id {
 	 * Return: 0 on success
 	 */
 	BPF_FUNC_l4_csum_replace,
+
+	/* eBPF functions for RBS */
+	BPF_FUNC_mptcp_rbs_printk,
+	BPF_FUNC_mptcp_rbs_add_drop,
+	BPF_FUNC_mptcp_rbs_add_push,
+	BPF_FUNC_mptcp_rbs_ktime_get_raw_ms,
+	BPF_FUNC_mptcp_rbs_random,
+	BPF_FUNC_mptcp_rbs_has_window_for,
+	BPF_FUNC_mptcp_rbs_bw_out_send,
+	BPF_FUNC_mptcp_rbs_bw_out_ack,
+	BPF_FUNC_mptcp_rbs_lossy,
+	BPF_FUNC_mptcp_rbs_sent_on_all,
+	BPF_FUNC_mptcp_rbs_q_next,
+	BPF_FUNC_mptcp_rbs_qu_next,
+	BPF_FUNC_mptcp_rbs_rq_next,
+	BPF_FUNC_mptcp_rbs_subflows_next,
+	BPF_FUNC_mptcp_rbs_varlist_expand,
+	BPF_FUNC_mptcp_rbs_skb_list_pop,
+
 	__BPF_FUNC_MAX_ID,
 };
 

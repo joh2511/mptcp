@@ -57,6 +57,8 @@
 #include <linux/workqueue.h>
 #include <linux/atomic.h>
 #include <linux/sysctl.h>
+#include <linux/inet.h>
+#include <linux/time.h>
 
 static struct kmem_cache *mptcp_sock_cache __read_mostly;
 static struct kmem_cache *mptcp_cb_cache __read_mostly;
@@ -114,6 +116,90 @@ static int proc_mptcp_scheduler(struct ctl_table *ctl, int write,
 	return ret;
 }
 
+
+int proc_mptcp_scheduler_select_parse(char* str, __be32* ip, __be16* port, char** name) {
+	unsigned long l;
+	unsigned int val;
+	int i;
+	//inspired by in_aton("10.0.0.2");
+	l = 0;
+	for (i = 0; i < 4; i++) {
+		l <<= 8;
+		if (*str != '\0') {
+			val = 0;
+			while (*str != '\0' && *str != '.' && *str != '\n' && *str != ':') {
+				val *= 10;
+				val += *str - '0';
+				str++;
+			}
+			l |= val;
+			if (*str != '\0')
+				str++;
+		}
+	}
+	*ip = htonl(l);
+
+	val = 0;
+	while (*str != '\0' && *str != ' ') {
+		val *= 10;
+		val += *str - '0';
+		str++;
+	}
+	*port = val;
+
+	if (*str != ' ')
+		return 1; // error
+	str++;
+	*name = str;
+
+	return 0;
+}
+
+static int proc_mptcp_scheduler_select(struct ctl_table *ctl, int write,
+				void __user *buffer, size_t *lenp,
+				loff_t *ppos)
+{
+	const int MAX_SIZE = MPTCP_SCHED_NAME_MAX+25; // ip and port
+	char val[MAX_SIZE];
+	struct ctl_table tbl = {
+		.data = val,
+		.maxlen = MAX_SIZE,
+	};
+	int ret;
+
+	if(write) {
+		__be32 ip;
+		__be16 port;
+		char* name;
+		long till_time_s;
+		struct timespec ts;
+		getnstimeofday(&ts);
+
+		till_time_s = ts.tv_sec + 60 * 5; // 5 minutes
+
+		ret = proc_dostring(&tbl, write, buffer, lenp, ppos);
+
+		if (ret == 0) {
+			ret = proc_mptcp_scheduler_select_parse(val, &ip, &port, &name);
+
+			if(ret == 0) {
+				mptcp_debug("afr: add for ip %i.%i.%i.%i and port %i scheduler %s at jiffy %llu\n", ip & 0x000000FF,
+												(ip & 0x0000FF00)>>8,
+												(ip & 0x00FF0000)>>16,
+												(ip & 0xFF000000)>>24,
+												port, name, jiffies);
+				ret = mptcp_set_default_scheduler_for_tuple(name, ip, port, till_time_s);
+			} else {
+				mptcp_debug("afr error parse\n");
+			}
+		} else {
+			mptcp_debug("afr error dostring\n");
+		}
+	}
+
+	return ret;
+}
+
 static struct ctl_table mptcp_table[] = {
 	{
 		.procname = "mptcp_enabled",
@@ -163,6 +249,12 @@ static struct ctl_table mptcp_table[] = {
 		.mode		= 0644,
 		.maxlen		= MPTCP_SCHED_NAME_MAX,
 		.proc_handler	= proc_mptcp_scheduler,
+	},
+	{
+		.procname	= "mptcp_schedselect",
+		.mode		= 0644,
+		.maxlen		= MPTCP_SCHED_NAME_MAX+25,
+		.proc_handler	= proc_mptcp_scheduler_select,
 	},
 	{ }
 };
@@ -684,6 +776,9 @@ void mptcp_destroy_sock(struct sock *sk)
 {
 	if (is_meta_sk(sk)) {
 		struct sock *sk_it, *tmpsk;
+
+		if (tcp_sk(sk)->mpcb->sched_ops->release)
+			tcp_sk(sk)->mpcb->sched_ops->release(sk);
 
 		__skb_queue_purge(&tcp_sk(sk)->mpcb->reinject_queue);
 		mptcp_purge_ofo_queue(tcp_sk(sk));
@@ -1238,6 +1333,8 @@ int mptcp_add_sock(struct sock *meta_sk, struct sock *sk, u8 loc_id, u8 rem_id,
 		kmem_cache_free(mptcp_sock_cache, tp->mptcp);
 		return -EPERM;
 	}
+
+	tp->mptcp->sbf_id = ++mpcb->last_sbf_id;
 
 	INIT_HLIST_NODE(&tp->mptcp->cb_list);
 
@@ -2448,10 +2545,11 @@ EXPORT_SYMBOL(mptcp_wq);
 static int mptcp_pm_seq_show(struct seq_file *seq, void *v)
 {
 	struct tcp_sock *meta_tp;
+	struct sock *sk;
 	const struct net *net = seq->private;
 	int i, n = 0;
 
-	seq_printf(seq, "  sl  loc_tok  rem_tok  v6 local_address                         remote_address                        st ns tx_queue rx_queue inode");
+	seq_printf(seq, "  sl  loc_tok  rem_tok  v6 local_address                         remote_address                        st ns tx_queue rx_queue inode scheduler  meta p");
 	seq_putc(seq, '\n');
 
 	for (i = 0; i < MPTCP_HASH_SIZE; i++) {
@@ -2493,13 +2591,44 @@ static int mptcp_pm_seq_show(struct seq_file *seq, void *v)
 					   ntohs(isk->inet_dport));
 #endif
 			}
-			seq_printf(seq, " %02X %02X %08X:%08X %lu",
+			seq_printf(seq, " %02X %02X %08X:%08X %lu %s  %p",
 				   meta_sk->sk_state, mpcb->cnt_subflows,
 				   meta_tp->write_seq - meta_tp->snd_una,
 				   max_t(int, meta_tp->rcv_nxt -
 					 meta_tp->copied_seq, 0),
-				   sock_i_ino(meta_sk));
+				   sock_i_ino(meta_sk), mpcb->sched_ops->name, meta_sk);
 			seq_putc(seq, '\n');
+
+#if 1
+			// added more stats per subflow... maybe we should move this to a new file
+			seq_printf(seq, "            snd            rcv           srtt           mdev    packets_out    retrans_out       snd_cwnd\n");
+
+			for ((sk) = (struct sock *)(mpcb)->connection_list; sk; sk = (struct sock *)tcp_sk(sk)->mptcp->next) {
+				//mptcp_for_each_sk(mpcb, sk) {
+				struct tcp_sock *tp = tcp_sk(sk);
+				struct inet_sock *isk_tmp = inet_sk(sk);
+
+				seq_printf(seq, "%15llu%15llu%15u%15u%15u%15u%15u  %#x    %i.%i.%i.%i:%i    %i.%i.%i.%i:%i\n",
+								tp->mptcp->bytes_snd,
+								tp->mptcp->bytes_rcv,
+								tp->srtt_us, tp->mdev_us,
+								tp->packets_out,
+								tp->retrans_out,
+								tp->snd_cwnd,
+								(unsigned int) tp,
+								isk_tmp->inet_rcv_saddr & 0x000000FF,
+								(isk_tmp->inet_rcv_saddr & 0x0000FF00)>>8,
+								(isk_tmp->inet_rcv_saddr & 0x00FF0000)>>16,
+								(isk_tmp->inet_rcv_saddr & 0xFF000000)>>24,
+								ntohs(isk_tmp->inet_sport),
+								isk_tmp->inet_daddr & 0x000000FF,
+								(isk_tmp->inet_daddr & 0x0000FF00)>>8,
+								(isk_tmp->inet_daddr & 0x00FF0000)>>16,
+								(isk_tmp->inet_daddr & 0xFF000000)>>24,
+								ntohs(isk_tmp->inet_dport)
+								);
+			}
+#endif
 		}
 
 		rcu_read_unlock_bh();

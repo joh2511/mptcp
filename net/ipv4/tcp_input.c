@@ -3296,6 +3296,16 @@ static void tcp_snd_una_update(struct tcp_sock *tp, u32 ack)
 	tp->bytes_acked += delta;
 	u64_stats_update_end(&tp->syncp);
 	tp->snd_una = ack;
+
+	/*
+	 * rbs statistics, the number of bytes between snd_una and data_ack
+	 * was acknowledged
+	 */
+	if(mptcp(tp) && mptcp_meta_tp(tp)->mpcb->sched_ops->update_stats) {
+		/* note that this is unsigned stuff, even wrap a around is correct */
+		mptcp_meta_tp(tp)->mpcb->sched_ops->update_stats((struct sock*) tp, NULL, delta, 1);
+	}
+	/* rbs statistics end */
 }
 
 /* If we update tp->rcv_nxt, also update tp->bytes_received */
@@ -4639,7 +4649,7 @@ drop:
 
 	if (before(TCP_SKB_CB(skb)->seq, tp->rcv_nxt)) {
 		/* Partial packet, seq < rcv_next < end_seq */
-		SOCK_DEBUG(sk, "partial packet: rcv_next %X seq %X - %X\n",
+		printk("partial packet: rcv_next %X seq %X - %X\n",
 			   tp->rcv_nxt, TCP_SKB_CB(skb)->seq,
 			   TCP_SKB_CB(skb)->end_seq);
 
@@ -4654,6 +4664,10 @@ drop:
 	}
 
 	tcp_data_queue_ofo(sk, skb);
+
+	if(mptcp(tp)) {
+		sk->sk_data_ready(sk);
+	}
 }
 
 static struct sk_buff *tcp_collapse_one(struct sock *sk, struct sk_buff *skb,
