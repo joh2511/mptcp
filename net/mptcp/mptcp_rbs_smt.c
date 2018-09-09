@@ -416,11 +416,11 @@ static struct tcp_sock **sbf_list_store(struct mptcp_rbs_value_sbf_list *value,
 	*tmp = NULL; /* implicit end with NULL */
 
 if(len == 0) {
-	printk("%s allocates space for %d subflows\n", __func__, len);
+	mptcp_debug("%s allocates space for %d subflows\n", __func__, len);
 } else if(len == 1) {
-	printk("%s allocates space for %d subflows, with first one %p\n", __func__, len, *list);
+	mptcp_debug("%s allocates space for %d subflows, with first one %p\n", __func__, len, *list);
 } else if(len > 1) {
-	printk("%s allocates space for %d subflows, with first one %p, second %p\n", __func__, len, *list, *(list + 1));
+	mptcp_debug("%s allocates space for %d subflows, with first one %p, second %p\n", __func__, len, *list, *(list + 1));
 }
 
 	return list;
@@ -517,7 +517,7 @@ void mptcp_rbs_smt_var_execute(struct mptcp_rbs_smt_var *self,
 		case TYPE_KIND_SBFLIST: {
 			struct mptcp_rbs_value_sbf_list *sbf_list_value =
 			    (struct mptcp_rbs_value_sbf_list *) self->value;
-printk("%s for meta_sk %p\n", __func__, ctx->mpcb->meta_sk);
+mptcp_debug("%s for meta_sk %p\n", __func__, ctx->mpcb->meta_sk);
 			var->sbf_list_value =
 			    sbf_list_store(sbf_list_value, ctx);
 			break;

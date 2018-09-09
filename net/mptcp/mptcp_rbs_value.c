@@ -420,7 +420,7 @@ struct tcp_sock *mptcp_rbs_value_sbf_list_var_execute(
 	struct mptcp_rbs_var *var = &ctx->vars[self->var_number];
 	struct tcp_sock **entry;
 
-printk("%s self %p *prev %p var->is_lazy %u coming from %pS for meta_sk %p\n", __func__, self, *prev, var->is_lazy, __builtin_return_address(0), ctx->mpcb->meta_sk);
+    mptcp_debug("%s self %p *prev %p var->is_lazy %u coming from %pS for meta_sk %p\n", __func__, self, *prev, var->is_lazy, __builtin_return_address(0), ctx->mpcb->meta_sk);
 
 	if (var->is_lazy) {
 		struct mptcp_rbs_value_sbf_list *value =
@@ -442,7 +442,7 @@ printk("%s self %p *prev %p var->is_lazy %u coming from %pS for meta_sk %p\n", _
 	if (*entry)
 		*prev = entry;
 
-printk("%s returns %p with is at %p\n", __func__, *entry, entry);
+    mptcp_debug("%s returns %p with is at %p\n", __func__, *entry, entry);
 
 	return *entry;
 }
@@ -3562,7 +3562,7 @@ struct tcp_sock *mptcp_rbs_value_sbf_list_next_execute(
 {
 	struct tcp_sock *sbf;
 
-printk("%s for meta_sk %p with self %p coming from %pS with self->exec_count %u and rbs_cb->exec_count %u and prev %p and isnull %d\n", __func__, ctx->mpcb->meta_sk, self,  __builtin_return_address(0), self->exec_count, ctx->rbs_cb->exec_count, self->prev, self->is_null);
+mptcp_debug("%s for meta_sk %p with self %p coming from %pS with self->exec_count %u and rbs_cb->exec_count %u and prev %p and isnull %d\n", __func__, ctx->mpcb->meta_sk, self,  __builtin_return_address(0), self->exec_count, ctx->rbs_cb->exec_count, self->prev, self->is_null);
 
 	if (self->exec_count != ctx->rbs_cb->exec_count) {
 		self->prev = NULL;
