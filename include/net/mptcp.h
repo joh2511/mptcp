@@ -343,6 +343,13 @@ struct mptcp_cb {
 	u32 orig_window_clamp;
 
 	struct tcp_info	*master_info;
+	u32 mptcp_johannes;
+	u32 mptcp_johannes_r1;
+	u32 mptcp_johannes_r2;
+	u32 mptcp_johannes_r3;
+	u32 mptcp_johannes_r4;
+	u32 mptcp_johannes_r5;
+	u32 mptcp_johannes_r6;
 };
 
 #define MPTCP_VERSION_0 0
