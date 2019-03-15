@@ -132,6 +132,13 @@ enum {
 #define MPTCP_INFO		45
 
 #define MPTCP_INFO_FLAG_SAVE_MASTER	0x01
+#define MPTCP_JOHANNES      50
+#define MPTCP_JOHANNES_R1   51
+#define MPTCP_JOHANNES_R2   52
+#define MPTCP_JOHANNES_R3   53
+#define MPTCP_JOHANNES_R4   54
+#define MPTCP_JOHANNES_R5   55
+#define MPTCP_JOHANNES_R6   56
 
 struct tcp_repair_opt {
 	__u32	opt_code;

@@ -2714,6 +2714,29 @@ static int do_tcp_setsockopt(struct sock *sk, int level,
 		}
 		break;
 
+#ifdef CONFIG_MPTCP
+    case MPTCP_JOHANNES:
+        tp->mpcb->mptcp_johannes = val;
+        break;
+    case MPTCP_JOHANNES_R1:
+        tp->mpcb->mptcp_johannes_r1 = val;
+        break;
+    case MPTCP_JOHANNES_R2:
+        tp->mpcb->mptcp_johannes_r2 = val;
+        break;
+    case MPTCP_JOHANNES_R3:
+        tp->mpcb->mptcp_johannes_r3 = val;
+        break;
+    case MPTCP_JOHANNES_R4:
+        tp->mpcb->mptcp_johannes_r4 = val;
+        break;
+    case MPTCP_JOHANNES_R5:
+        tp->mpcb->mptcp_johannes_r5 = val;
+        break;
+    case MPTCP_JOHANNES_R6:
+        tp->mpcb->mptcp_johannes_r6 = val;
+        break;
+#endif
 	case TCP_THIN_LINEAR_TIMEOUTS:
 		if (val < 0 || val > 1)
 			err = -EINVAL;
@@ -3466,6 +3489,28 @@ static int do_tcp_getsockopt(struct sock *sk, int level,
 			return -EFAULT;
 		return 0;
 	}
+    case MPTCP_JOHANNES:
+        val = tp->mpcb->mptcp_johannes;
+        break;
+    case MPTCP_JOHANNES_R1:
+        val = tp->mpcb->mptcp_johannes_r1;
+        break;
+    case MPTCP_JOHANNES_R2:
+        val = tp->mpcb->mptcp_johannes_r2;
+        break;
+    case MPTCP_JOHANNES_R3:
+        val = tp->mpcb->mptcp_johannes_r3;
+        break;
+    case MPTCP_JOHANNES_R4:
+        val = tp->mpcb->mptcp_johannes_r4;
+        break;
+    case MPTCP_JOHANNES_R5:
+        val = tp->mpcb->mptcp_johannes_r5;
+        break;
+    case MPTCP_JOHANNES_R6:
+        val = tp->mpcb->mptcp_johannes_r6;
+        break;
+
 #endif
 	default:
 		return -ENOPROTOOPT;
